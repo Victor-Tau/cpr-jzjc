@@ -1,0 +1,30 @@
+{
+  "baseline": [
+    {
+      "kind": "cold",
+      "callbacks": 4,
+      "localSeconds": 2.2459,
+      "schedulingGapSeconds": 90
+    },
+    {
+      "kind": "warm",
+      "callbacks": 4,
+      "localSeconds": 3.9306,
+      "schedulingGapSeconds": 90
+    }
+  ],
+  "current": [
+    {
+      "kind": "cold",
+      "callbacks": 1,
+      "localSeconds": 2.8864,
+      "schedulingGapSeconds": 0
+    },
+    {
+      "kind": "warm",
+      "callbacks": 1,
+      "localSeconds": 0.0485,
+      "schedulingGapSeconds": 0
+    }
+  ]
+}

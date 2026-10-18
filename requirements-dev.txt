@@ -1,0 +1,2 @@
+numpy==2.4.3
+pyelftools==0.33

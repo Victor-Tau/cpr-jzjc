@@ -1,0 +1,10 @@
+.cache/
+.venv/
+**/node_modules/
+**/target/
+**/__pycache__/
+frontend/dist/
+runtime/*.tar.gz
+dist/*
+!dist/.gitkeep
+*.pyc
