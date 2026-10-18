@@ -47,7 +47,7 @@ with tempfile.TemporaryDirectory(prefix='modeltrace-package-check-') as director
         b=host.request('api/bootstrap');config=b['config'];config.update(keyId='key-test',lowConfidencePercent=0,degradedPercent=100,retryDelaySeconds=0)
         host.request('api/config',{'config':config,'revision':b['configRevision']})
         job=host.request('api/submit',{'accountIds':['acct-test'],'requestId':'artifact-runtime-check'})['submitted'][0]
-        host.tick()
+        host.tick(2)
         report=host.request('api/report?id='+job)
         assert report['status']=='completed',report['message']
         assert len(report['rounds'])==1 and len(host.executions)==1,report

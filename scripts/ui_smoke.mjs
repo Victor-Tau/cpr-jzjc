@@ -156,6 +156,20 @@ try {
   assert.match(await page.locator('.live-progress').innerText(),/2\.0 KB/)
   await page.getByRole('button',{name:'报告',exact:true}).click()
   await page.getByText('配置快照与版本',{exact:true}).waitFor()
+  const reportsBeforeRetry=await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/report').length)
+  await page.evaluate(()=>{
+    const f=window.__fixture,j=f.bootstrap.jobs[0]
+    f.report.attempts.push({requestId:'retry-request',at:Date.now(),error:'宿主调用预算超时',diagnostics:{kind:'host_budget_timeout',elapsedMs:28000,budgetMs:27900,receivedBytes:2048}})
+    j.attemptCount=f.report.attempts.length;j.roundAttempts=f.report.roundAttempts=1
+    j.message=f.report.message='宿主调用预算超时；等待重试'
+    j.progress=f.report.progress={stage:'waiting_retry',stageStartedAt:Date.now(),updatedAt:Date.now(),detail:{nextAt:Date.now()+10000}}
+    f.revision++
+  })
+  await page.getByRole('status').filter({hasText:'宿主调用预算超时；等待重试'}).last().waitFor({timeout:2500})
+  assert(await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/report').length)>reportsBeforeRetry)
+  assert.match(await page.getByRole('status').filter({hasText:'宿主调用预算超时；等待重试'}).last().innerText(),/本轮已尝试 1\/5 次/)
+  await page.getByText('请求记录（2）',{exact:true}).click()
+  await page.getByText('耗时 28.0 秒 · 已接收 2.0 KB',{exact:false}).waitFor()
   await page.evaluate(()=>{
     const f=window.__fixture
     f.bootstrap.jobs[0].progress=f.report.progress={stage:'scoring',stageStartedAt:Date.now(),updatedAt:Date.now(),detail:{}}
@@ -210,5 +224,5 @@ try {
   await frame.getByText('配置已载入表单，请核对计量 Key、目标分组和定时范围，再保存。',{exact:true}).waitFor()
   assert.deepEqual(errors,[])
   for(const path of ['api/submit','api/models','api/config','api/banks/check','api/banks/apply','api/banks/rollback','api/report','api/config/preview','api/retry-group'])assert(paths.includes(path),path)
-  console.log(JSON.stringify({ui:'passed',checks:['unclipped checkboxes on desktop and mobile','colored account statuses','single save button','search','subscription filter','batch submit','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
+  console.log(JSON.stringify({ui:'passed',checks:['unclipped checkboxes on desktop and mobile','colored account statuses','single save button','search','subscription filter','batch submit','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
 } finally {await browser.close()}

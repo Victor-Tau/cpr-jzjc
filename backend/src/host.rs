@@ -289,6 +289,7 @@ pub struct ExecutionError {
     pub request_id: Option<String>,
     pub message: String,
     pub permanent: bool,
+    pub diagnostics: crate::domain::ProbeDiagnostics,
 }
 
 /// Pin every probe to its submitted account. The host resolves credentials and
@@ -323,6 +324,23 @@ pub async fn execute(
     }
     let mut stream = None;
     let mut request_id = None;
+    let started = tokio::time::Instant::now();
+    let mut received_bytes = 0;
+    let configured_deadline = (cfg.timeout_seconds != 0)
+        .then(|| started.checked_add(std::time::Duration::from_secs(cfg.timeout_seconds)))
+        .flatten();
+    let host_limited = parent_deadline
+        .is_some_and(|parent| configured_deadline.is_none_or(|configured| parent <= configured));
+    let deadline = match (configured_deadline, parent_deadline) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let budget_ms = deadline.map(|deadline| {
+        deadline
+            .saturating_duration_since(started)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64
+    });
     let request = async {
         let r = host
             .call(
@@ -377,6 +395,7 @@ pub async fn execute(
                     if sse.len() > 1024 * 1024 {
                         return Err(fault("回答超过1MiB"));
                     }
+                    received_bytes = sse.len();
                 }
             }
             if last_update.elapsed() >= std::time::Duration::from_millis(250) || state.end {
@@ -396,16 +415,6 @@ pub async fn execute(
     };
     // Zero disables the plugin deadline. Huge durations that cannot fit the
     // monotonic clock also have no reachable deadline; never overflow Instant.
-    let configured_deadline = (cfg.timeout_seconds != 0)
-        .then(|| {
-            tokio::time::Instant::now()
-                .checked_add(std::time::Duration::from_secs(cfg.timeout_seconds))
-        })
-        .flatten();
-    let deadline = match (configured_deadline, parent_deadline) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
     let bounded = async {
         match deadline {
             Some(deadline) => tokio::time::timeout_at(deadline, request).await,
@@ -427,6 +436,7 @@ pub async fn execute(
     match result {
         Ok(Ok(text)) => Ok((request_id.unwrap_or_default(), text)),
         other => {
+            let timed_out = other.is_err();
             let (message, typed_permanent) = match other {
                 Ok(Err(e)) => {
                     let permanent = matches!(
@@ -457,9 +467,24 @@ pub async fn execute(
                 .iter()
                 .any(|s| lower.contains(s));
             // Host faults may contain upstream text; return categories rather than credentials or headers.
+            let kind = if timed_out && host_limited {
+                "host_budget_timeout"
+            } else if timed_out {
+                "request_timeout"
+            } else if permanent {
+                "request_rejected"
+            } else {
+                "upstream_failure"
+            };
             Err(ExecutionError {
                 request_id,
-                message: if permanent {
+                message: if timed_out && host_limited {
+                    format!(
+                        "宿主调用预算超时（本次请求窗口约{:.1}秒，已接收{:.1}KB流数据）",
+                        budget_ms.unwrap_or_default() as f64 / 1000.0,
+                        received_bytes as f64 / 1024.0
+                    )
+                } else if permanent {
                     "账户认证、Key权限或模型参数被拒绝，请检查宿主日志".into()
                 } else if lower.contains("429") || lower.contains("rate_limit") {
                     "上游限流".into()
@@ -469,6 +494,12 @@ pub async fn execute(
                     "模型请求失败或未完整结束，请检查宿主请求记录".into()
                 },
                 permanent,
+                diagnostics: crate::domain::ProbeDiagnostics {
+                    kind: kind.into(),
+                    elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                    received_bytes,
+                    budget_ms,
+                },
             })
         }
     }

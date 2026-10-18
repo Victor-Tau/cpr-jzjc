@@ -62,9 +62,9 @@ async function refreshJobs() { const r=await api.jobs(); jobs.value=r.jobs; bank
 function progressText(j: Job | Report) {
   const p=j.progress
   if (!p || !active(j as Job)) return j.message
-  const labels: Record<string,string>={preparing:'正在准备挑战',requesting:'正在发送请求',waiting_response:'等待模型响应',receiving:'正在接收回答',validating:'正在校验样本',scoring:'正在分析结果',waiting_retry:'等待重试',waiting_retest:'等待复测',cancelling:'正在取消检测'}
+  const labels: Record<string,string>={preparing:'正在准备挑战',requesting:'正在发送请求',waiting_response:'等待模型响应',receiving:'正在接收回答',validating:'正在校验样本',scoring:'正在分析结果',waiting_retry:'等待重试',waiting_retest:'等待复测',cancelling:'正在取消检测',waiting_request:'准备完成，等待发起请求'}
   const remaining=p.detail.nextAt ? Math.max(0,Math.ceil((p.detail.nextAt-clock.value)/1000)) : 0
-  if (p.stage==='waiting_retry' || p.stage==='waiting_retest') return `${labels[p.stage]} · ${remaining>0 ? `${remaining} 秒后可执行` : '等待调度'}`
+  if (p.stage==='waiting_retry' || p.stage==='waiting_retest') return `${j.message || labels[p.stage]}${j.roundAttempts ? `（本轮已尝试 ${j.roundAttempts}/5 次）` : ''} · ${remaining>0 ? `${remaining} 秒后可执行` : '等待调度'}`
   const elapsed=Math.max(0,Math.floor((clock.value-p.stageStartedAt)/1000))
   const bytes=p.detail.receivedBytes
   return `${labels[p.stage] || j.message} · ${elapsed} 秒${bytes ? ` · 已接收 ${(bytes/1024).toFixed(1)} KB` : ''}`
@@ -80,7 +80,7 @@ async function refreshProgress() {
   const current=report.value
   if (reportOpen.value && current) {
     const job=r.jobs.find(j=>j.id===current.id)
-    if (job && (job.roundCount!==current.rounds.length || job.status!==current.status || job.disableState!==current.disableState || job.groupState!==current.groupState)) {
+    if (job && (job.attemptCount!==current.attempts.length || job.roundCount!==current.rounds.length || job.status!==current.status || job.disableState!==current.disableState || job.groupState!==current.groupState)) {
       const updated=await api.report(current.id)
       if (reportOpen.value && report.value?.id===current.id) {
         const followingLatest=roundIndex.value>=current.rounds.length-1
@@ -154,7 +154,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
     <ZDialog v-model="reportOpen" title="检测报告" width="60rem">
       <template v-if="report"><div class="section-heading"><div><h3>{{ report.accountName }}</h3><p :class="{danger:report.verdict==='degraded'}" role="status" aria-live="polite">{{ progressText(report) }}</p></div><ZButton :disabled="busy" @click="openReport(report.id)">刷新报告</ZButton></div><div class="report-meta"><span>请求模型 <b>{{ report.config.requestModel }}</b></span><span>指纹库 <code>{{ report.bankCommit?.slice(0,12) }}</code></span><span>采样尝试 {{ report.attempts.length }}</span></div><p v-if="report.disableState==='failed'" class="danger">关闭调度操作失败：{{ report.disableError || '请检查宿主状态' }}。<ZButton size="small" :disabled="busy" @click="retryDisable(report.id)">重试关闭调度</ZButton></p><p v-if="report.groupState==='failed'" class="danger">移组操作失败：{{ report.groupError || '请检查宿主状态' }}。<ZButton size="small" :disabled="busy" @click="retryGroup(report.id)">重试移入分组</ZButton></p><ZSelect v-if="report.rounds.length" v-model="roundIndex" :options="report.rounds.map((r,i)=>({value:i,label:`第${r.number}轮 · ${verdict(r.verdict)} · ${date(r.finishedAt)}`}))" aria-label="报告轮次" />
       <template v-if="currentRound"><div class="family-summary"><ZTag v-for="f in currentRound.score.families" :key="f.family">{{ f.display_name }} {{ percent(f.probability) }}</ZTag></div><div class="probabilities"><div v-for="r in currentRound.score.results" :key="r.model" class="probability-row"><span>{{ r.label }}</span><div class="bar"><i :style="{width:`${r.probability*100}%`}" /></div><b>{{ percent(r.probability) }}</b></div></div></template><p v-else class="muted">尚无完整轮次结果。</p>
-      <details><summary>配置快照与版本</summary><pre>{{ JSON.stringify({config:report.config,bankHash:report.bankHash,bankCommit:report.bankCommit,engineCommit:report.engineCommit},null,2) }}</pre></details><details><summary>请求记录（{{ report.attempts.length }}）</summary><ul class="attempts"><li v-for="(a,i) in report.attempts" :key="i"><time>{{ date(a.at) }}</time><code>{{ a.requestId || '未取得请求ID' }}</code><span>{{ a.error || '有效样本' }}</span></li></ul></details></template>
+      <details><summary>配置快照与版本</summary><pre>{{ JSON.stringify({config:report.config,bankHash:report.bankHash,bankCommit:report.bankCommit,engineCommit:report.engineCommit},null,2) }}</pre></details><details><summary>请求记录（{{ report.attempts.length }}）</summary><ul class="attempts"><li v-for="(a,i) in report.attempts" :key="i"><time>{{ date(a.at) }}</time><code>{{ a.requestId || '未取得请求ID' }}</code><span>{{ a.error || '有效样本' }}</span><small v-if="a.diagnostics">耗时 {{ (a.diagnostics.elapsedMs/1000).toFixed(1) }} 秒 · 已接收 {{ (a.diagnostics.receivedBytes/1024).toFixed(1) }} KB<span v-if="a.diagnostics.budgetMs != null"> · 本次请求窗口 {{ (a.diagnostics.budgetMs/1000).toFixed(1) }} 秒</span></small></li></ul></details></template>
     </ZDialog>
   </main>
 </template>

@@ -21,7 +21,7 @@ def main():
         sample_config.update(lowConfidencePercent=0, degradedPercent=100, retryDelaySeconds=0)
         host.request("api/config", {"config": sample_config, "revision": initial["configRevision"]})
         job = host.request("api/submit", {"accountIds": ["acct-test"], "requestId": "ui-fixture"})["submitted"][0]
-        host.tick()
+        host.tick(2)
         bootstrap = host.request("api/bootstrap")
         bootstrap["config"] = display_config
         accounts = []

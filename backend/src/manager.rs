@@ -54,6 +54,7 @@ pub struct Manager {
     pub engine: Engine,
     pub progress: Arc<Progress>,
     deadline: Option<tokio::time::Instant>,
+    request_window: std::time::Duration,
 }
 impl Manager {
     pub fn new(progress: Arc<Progress>) -> Self {
@@ -66,6 +67,7 @@ impl Manager {
             engine: Engine::new(),
             progress,
             deadline: None,
+            request_window: std::time::Duration::ZERO,
         }
     }
     pub async fn save(&mut self, host: &HostClient) -> Result<(), PluginFault> {
@@ -179,7 +181,7 @@ impl Manager {
         json!({"active":self.active_bank(),"previous":self.control.previous_bank.as_ref().and_then(|h|self.control.banks.iter().find(|b|&b.hash==h)),"builtin":banks::builtin(),"update":self.control.update,"engineCommit":banks::engine_commit()})
     }
     pub fn summaries(&self) -> Vec<Value> {
-        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state})).collect()
+        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state})).collect()
     }
     pub async fn set_config(
         &mut self,
@@ -656,6 +658,9 @@ impl Manager {
         host: &HostClient,
         budget: std::time::Duration,
     ) -> Result<(), PluginFault> {
+        // Give the network up to 28s of a 30s call. The worker is already warm
+        // before dispatch; validation and persistence retain 2s, scoring can wait.
+        self.request_window = budget.saturating_sub(std::time::Duration::from_secs(2));
         self.deadline = Some(
             tokio::time::Instant::now()
                 + budget.saturating_sub(std::time::Duration::from_millis(1500)),
@@ -770,6 +775,25 @@ impl Manager {
                 .unwrap_or_default();
             if remaining < std::time::Duration::from_secs(6) {
                 break;
+            }
+            let job = &self.jobs[i].0;
+            if !job.challenges.is_empty() && job.samples.is_empty() {
+                let desired = if job.config.timeout_seconds == 0 {
+                    self.request_window
+                } else {
+                    self.request_window
+                        .min(std::time::Duration::from_secs(job.config.timeout_seconds))
+                };
+                let available = remaining.saturating_sub(std::time::Duration::from_millis(500));
+                if available < desired.saturating_sub(std::time::Duration::from_millis(500)) {
+                    // Cold extraction/preparation must not silently shorten every
+                    // probe. Yield without sending or consuming a retry attempt.
+                    self.jobs[i].0.message = "准备完成，等待下一次调度发起请求".into();
+                    self.progress
+                        .phase(&self.jobs[i].0.id, "waiting_request", json!({}));
+                    self.save_job(host, i).await?;
+                    break;
+                }
             }
             let attempts = self.jobs[i].0.attempts.len();
             self.advance_step(host, i).await?;
@@ -891,7 +915,9 @@ impl Manager {
         self.jobs[i].0.message = format!("第{}轮，正在检测", self.jobs[i].0.rounds.len() + 1);
         self.save_job(host, i).await?;
         self.progress.phase(&self.jobs[i].0.id,"requesting",json!({"round":self.jobs[i].0.rounds.len()+1,"attempt":self.jobs[i].0.round_attempts,"expectedCount":challenge.expected_count}));
-        let request_deadline = self.deadline.map(|d| d - std::time::Duration::from_secs(6));
+        let request_deadline = self
+            .deadline
+            .map(|d| d - std::time::Duration::from_millis(500));
         let result = host::execute(
             host,
             &self.jobs[i].0,
@@ -909,6 +935,7 @@ impl Manager {
                 request_id,
                 at: now(),
                 error: Some("管理员取消检测".into()),
+                diagnostics: None,
             });
             self.jobs[i].0.pending_probe = false;
             self.jobs[i]
@@ -919,6 +946,7 @@ impl Manager {
         self.progress
             .phase(&self.jobs[i].0.id, "validating", json!({}));
         let mut permanent = false;
+        let mut diagnostics = None;
         let (request_id, numbers, error) = match result {
             Ok((id, text)) => match self
                 .engine
@@ -932,15 +960,24 @@ impl Manager {
             },
             Err(e) => {
                 permanent = e.permanent;
+                diagnostics = Some(e.diagnostics);
                 (e.request_id, None, Some(e.message))
             }
         };
         let j = &mut self.jobs[i].0;
+        let repeated_budget_timeout = diagnostics
+            .as_ref()
+            .is_some_and(|d| d.kind == "host_budget_timeout")
+            && j.attempts
+                .last()
+                .and_then(|a| a.diagnostics.as_ref())
+                .is_some_and(|d| d.kind == "host_budget_timeout");
         j.pending_probe = false;
         j.attempts.push(Attempt {
             request_id,
             at: now(),
             error: error.clone(),
+            diagnostics,
         });
         if let Some(numbers) = numbers {
             j.samples.push(Sample {
@@ -948,11 +985,18 @@ impl Manager {
                 expected_count: challenge.expected_count,
             });
             j.message = "已获得本轮有效样本，等待评分".into();
-        } else if permanent || j.round_attempts >= 5 {
+        } else if permanent || repeated_budget_timeout || j.round_attempts >= 5 {
             j.finish(
                 "failed",
                 "inconclusive",
-                error.unwrap_or_else(|| "采样失败".into()),
+                if repeated_budget_timeout {
+                    format!(
+                        "{}；连续两次超出宿主调用预算，已停止重复请求",
+                        error.unwrap_or_default()
+                    )
+                } else {
+                    error.unwrap_or_else(|| "采样失败".into())
+                },
                 now(),
             );
         } else {

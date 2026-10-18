@@ -97,7 +97,7 @@ async fn handle(
             )
         }
         ("GET", "api/models") => {
-            let models:gateway_plugin_sdk::call::host::ModelListResult=host::meta(h,"host.models.list",json!({"client_key_id":query("keyId"),"protocol":"openai","client_version":"modeltrace-health/1.4.0"})).await?;
+            let models:gateway_plugin_sdk::call::host::ModelListResult=host::meta(h,"host.models.list",json!({"client_key_id":query("keyId"),"protocol":"openai","client_version":"modeltrace-health/1.4.1"})).await?;
             Ok(json!({"models":models.models}))
         }
         ("GET", "api/progress") => m

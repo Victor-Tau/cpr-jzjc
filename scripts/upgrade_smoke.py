@@ -66,7 +66,12 @@ def main():
             assert after["config"]["targetGroupId"] == ""
             assert restored["groupState"] == "none"
             for key in ["status", "verdict", "rounds", "attempts", "bankHash", "bankCommit", "disableState"]:
-                equivalent(report[key], restored[key])
+                previous = copy.deepcopy(report[key])
+                if key == "attempts":
+                    for attempt in previous:
+                        # v1.4.1 adds optional timing diagnostics; old requests have none.
+                        attempt.setdefault("diagnostics", None)
+                equivalent(previous, restored[key])
             assert after["banks"]["active"]["hash"] == before["banks"]["active"]["hash"]
             assert len(current.executions) == 0
             print(f"Upgrade {manifests[0]['version']} -> {manifests[1]['version']}: settings, schedule, history and bank retained; no probe replay.")

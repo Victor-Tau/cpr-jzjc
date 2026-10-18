@@ -318,6 +318,16 @@ pub struct Attempt {
     pub request_id: Option<String>,
     pub at: u64,
     pub error: Option<String>,
+    #[serde(default)]
+    pub diagnostics: Option<ProbeDiagnostics>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeDiagnostics {
+    pub kind: String,
+    pub elapsed_ms: u64,
+    pub received_bytes: usize,
+    pub budget_ms: Option<u64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

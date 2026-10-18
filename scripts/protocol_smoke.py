@@ -60,9 +60,9 @@ class Host:
         a,b=struct.unpack('>IQ',read(12));meta=json.loads(read(a));body=read(b);d=meta.get('data_bytes',0);r=meta.get('request_context_bytes',0)
         return meta,json.loads(body[r:r+d]) if d else None,body[r+d:]
 
-    def call(self,method,params=None,payload=b'',stage='management'):
+    def call(self,method,params=None,payload=b'',stage='management',timeout_ms=30000):
         i=self.sequence;self.sequence+=2
-        context={'call_id':i,'instance_id':'test','generation':1,'incarnation':'test-run','stage':stage,'timeout_ms':30000,'resource_stream':False,'resource_scope_id':f'scope-{i}','request_id':None,'attempt_id':None,'account_id':None,'credential_revision':None}
+        context={'call_id':i,'instance_id':'test','generation':1,'incarnation':'test-run','stage':stage,'timeout_ms':timeout_ms,'resource_stream':False,'resource_scope_id':f'scope-{i}','request_id':None,'attempt_id':None,'account_id':None,'credential_revision':None}
         self.send({'type':'call','id':i,'method':method,'context':context},params or {},payload)
         while True:
             meta,data,body=self.receive()
@@ -89,8 +89,8 @@ class Host:
         else:assert data['status']!=200,result
         return result
 
-    def tick(self,n=1):
-        for _ in range(n):self.call('plugin.reconcile',stage='maintenance')
+    def tick(self,n=1,budget_ms=30000):
+        for _ in range(n):self.call('plugin.reconcile',stage='maintenance',timeout_ms=budget_ms)
 
     def stream(self,body):
         s='stream-'+str(len(self.streams));self.streams[s]=[body];return s
@@ -188,12 +188,15 @@ class Host:
 class SimulatedFault(Exception):pass
 
 class Integration(unittest.TestCase):
-    def setUp(self):self.host=Host();self.addCleanup(self.host.close)
+    def setUp(self):
+        self.host=Host();self.addCleanup(self.host.close)
+        self.host.request('api/banks/builtin',{}) # Most cases isolate probing from cold startup; tested separately below.
     def config(self,**overrides):
         b=self.host.request('api/bootstrap');c=b['config'];c.update({'keyId':'key-test','retryDelaySeconds':0});c.update(overrides)
         self.host.request('api/config',{'config':c,'revision':b['configRevision']});return c
     def submit(self):return self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'submit-one'})['submitted'][0]
     def confirmed_config(self, **overrides):
+        self.host.request('api/banks/builtin',{})
         cfg=dict(degradedModels=[m['id'] for m in json.loads(self.host.bank)['models']],lowConfidencePercent=0,degradedPercent=0)
         cfg.update(overrides);return self.config(**cfg)
 
@@ -291,6 +294,49 @@ class Integration(unittest.TestCase):
         identity=self.submit();self.host.tick(3)
         report=self.host.request('api/report?id='+identity)
         self.assertNotEqual(report['verdict'],'degraded');self.assertEqual(self.host.updates,[])
+
+    def test_cold_preparation_does_not_shorten_25_second_probe(self):
+        self.host.close();self.host=Host();self.addCleanup(self.host.close)
+        self.config(lowConfidencePercent=0,degradedPercent=100);identity=self.submit()
+        original=self.host.callback;delayed=[]
+        def callback(method,p,body):
+            if method=='host.state.put' and p['namespace']=='jobs' and p['value'].get('challenges') and not p['value'].get('pendingProbe') and not delayed:
+                delayed.append(True);time.sleep(3)
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['progress']['stage'],'waiting_request');self.assertEqual(report['roundAttempts'],0);self.assertEqual(self.host.executions,[])
+        self.host.model_read_delay=25;self.host.tick();self.host.model_read_delay=0
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(len(report['attempts']),1);self.assertIsNone(report['attempts'][0]['error']);self.assertFalse(report['pendingProbe'])
+        if report['status']=='running':self.host.tick()
+        self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed');self.assertEqual(len(self.host.executions),1)
+
+    def test_repeated_host_budget_timeouts_stop_with_diagnostics(self):
+        self.config();identity=self.submit();original=self.host.callback;seen=set()
+        def callback(method,p,body):
+            if method=='host.model.stream_read' and len(self.host.executions) not in seen:
+                seen.add(len(self.host.executions));self.host.model_read_delay=20
+                value={'type':'response.output_text.delta','delta':'1,2,3,'}
+                event=raw({'wire':{'protocol':'openai','payload':{'kind':'json','event':None,'data':value}}})
+                event=b'GPE2'+struct.pack('>III',len(event),0,0)+event
+                return {'events':1,'end':False},b'HME1'+struct.pack('>II',1,len(event))+event
+            return original(method,p,body)
+        self.host.callback=callback
+        for _ in range(2):
+            self.host.model_read_delay=0;self.host.tick(budget_ms=10000)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),2);self.assertIn('连续两次',report['message'])
+        for attempt in report['attempts']:
+            self.assertEqual(attempt['diagnostics']['kind'],'host_budget_timeout');self.assertGreater(attempt['diagnostics']['receivedBytes'],0)
+            self.assertGreater(attempt['diagnostics']['budgetMs'],7400);self.assertLessEqual(attempt['diagnostics']['budgetMs'],8000)
+        self.host.tick();self.assertEqual(len(self.host.executions),2)
+
+    def test_configured_timeout_keeps_five_attempt_limit(self):
+        self.config(timeoutSeconds=1);identity=self.submit();self.host.model_read_delay=2;self.host.tick(5)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),5)
+        self.assertTrue(all(a['diagnostics']['kind']=='request_timeout' for a in report['attempts']))
 
     def test_registration_and_queries(self):
         _,payload=self.host.call('management.register',stage='registration');registration=json.loads(payload);self.assertIn('api/report',[r['path'] for r in registration['routes']])
