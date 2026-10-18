@@ -2,6 +2,7 @@
 import argparse
 import copy
 import json
+import time
 from pathlib import Path
 
 from protocol_smoke import BINARY, ROOT, Host
@@ -17,13 +18,16 @@ def main():
         initial = host.request("api/bootstrap")
         display_config = copy.deepcopy(initial["config"])
         display_config["keyId"] = "key-test"
+        display_config["schedule"].update(enabled=True, kind="interval", intervalMinutes=30)
         sample_config = copy.deepcopy(display_config)
         sample_config.update(lowConfidencePercent=0, degradedPercent=100, retryDelaySeconds=0)
+        sample_config["schedule"]["enabled"] = False
         host.request("api/config", {"config": sample_config, "revision": initial["configRevision"]})
         job = host.request("api/submit", {"accountIds": ["acct-test"], "requestId": "ui-fixture"})["submitted"][0]
         host.tick(2)
         bootstrap = host.request("api/bootstrap")
         bootstrap["config"] = display_config
+        bootstrap["nextDue"] = int(time.time() * 1000) + 29 * 60 * 1000
         accounts = []
         for i in range(43):
             accounts.append({

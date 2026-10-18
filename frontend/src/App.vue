@@ -45,6 +45,37 @@ const pageCandidates = computed(() => visible.value.filter(canDetect))
 const chosen = computed(() => accounts.value.filter(a => selected.value.includes(a.id) && canDetect(a)))
 const allPage = computed(() => pageCandidates.value.length > 0 && pageCandidates.value.every(a => selected.value.includes(a.id)))
 const activeJobs = computed(() => jobs.value.filter(j => active(j)).length)
+const autoPeriod = computed(() => {
+  const s = config.value?.schedule
+  if (!s?.enabled) return '已关闭'
+  if (s.kind === 'daily') return `每日 ${s.time}`
+  const m = s.intervalMinutes
+  if (m < 60) return `每 ${m} 分钟`
+  if (m % 60 === 0) return `每 ${m / 60} 小时`
+  return `每 ${Math.floor(m / 60)} 小时 ${m % 60} 分`
+})
+const autoTitle = computed(() => {
+  const s = config.value?.schedule
+  if (!s?.enabled) return '自动定时检测已关闭，可在参数配置中开启'
+  return s.kind === 'daily' ? `自动定时检测：每日 ${s.time}（${s.timezone}）` : `自动定时检测：每 ${s.intervalMinutes} 分钟`
+})
+function shortWhen(value: number) {
+  const at = new Date(value), now = new Date(clock.value)
+  const time = at.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+  if (at.toDateString() === now.toDateString()) return time
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+  if (at.toDateString() === tomorrow.toDateString()) return `明天 ${time}`
+  return `${at.getMonth() + 1}月${at.getDate()}日 ${time}`
+}
+const nextRun = computed(() => {
+  if (!config.value) return null
+  const now = clock.value
+  const candidates = jobs.value.filter(j => active(j)).map(j => ({ at: Math.max(j.nextAt ?? 0, now), source: j.source === 'schedule' ? 'schedule' : 'manual' }))
+  if (config.value.schedule.enabled && nextDue.value != null) candidates.push({ at: Math.max(nextDue.value, now), source: 'schedule' })
+  candidates.sort((a, b) => a.at - b.at)
+  return candidates[0] ?? null
+})
+const runWhen = computed(() => !nextRun.value ? '—' : nextRun.value.at <= clock.value + 2000 ? '现在' : shortWhen(nextRun.value.at))
 const degradedCount = computed(() => Array.from(latest.value.values()).filter(j => j.verdict === 'degraded').length)
 const history = computed(() => jobs.value.filter(j => (!historySearch.value || `${j.accountName} ${j.accountId}`.toLowerCase().includes(historySearch.value.toLowerCase())) && (!historyVerdict.value || j.verdict === historyVerdict.value || j.status === historyVerdict.value)))
 const visibleHistory = computed(() => history.value.slice((historyPage.value-1)*historySize.value,historyPage.value*historySize.value))
@@ -128,7 +159,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
     <div v-if="notice" class="message success" role="status"><span>{{ notice }}</span><button aria-label="关闭提示" @click="notice=''">×</button></div>
     <p v-if="loading">正在读取账户与插件配置…</p>
     <template v-if="tab==='accounts'">
-      <div class="counters"><button @click="resultFilter=''">全部账户 <b>{{ accounts.length }}</b></button><button @click="resultFilter='active'">检测队列 <b>{{ activeJobs }}</b></button><button class="danger" @click="resultFilter='degraded'">确认降智 <b>{{ degradedCount }}</b></button><span>下次定时 <b class="small">{{ date(nextDue) }}</b></span></div>
+      <div class="counters"><button @click="resultFilter=''">全部账户 <b>{{ accounts.length }}</b></button><button @click="resultFilter='active'">检测队列 <b>{{ activeJobs }}</b></button><button class="danger" @click="resultFilter='degraded'">确认降智 <b>{{ degradedCount }}</b></button><span class="auto-pill" :class="config?.schedule.enabled ? 'on' : 'off'" role="status" :title="autoTitle">{{ config?.schedule.enabled ? `自动检测 · ${autoPeriod}` : '自动检测 · 已关闭' }}</span><span class="next-run" :title="nextRun ? `下一次可执行：${date(nextRun.at)}（${nextRun.source === 'schedule' ? '自动' : '手动'}）` : '当前没有待执行的检测'">下次检测 <b class="small">{{ runWhen }}</b><em v-if="nextRun" :class="nextRun.source === 'schedule' ? 'auto' : 'manual'">{{ nextRun.source === 'schedule' ? '（自动）' : '（手动）' }}</em></span></div>
       <div class="toolbar"><ZInput v-model="search" class="search" placeholder="搜索名称、邮箱或账户ID" clearable aria-label="搜索账户"><template #prefix><Search :size="16" /></template></ZInput><ZSelect v-model="plan" class="filter" :options="plans" aria-label="订阅类型筛选" /><ZSelect v-model="state" class="filter" :options="statuses" aria-label="账户状态筛选" /><ZSelect v-model="group" class="filter" :options="groups" aria-label="账户分组筛选" /><div class="commands"><ZButton :disabled="busy" @click="action(loadAccounts)"><template #icon><RefreshCw :size="15" /></template>刷新账户</ZButton><ZButton v-if="activeJobs" :disabled="busy" @click="cancel()"><template #icon><Square :size="14" /></template>停止队列</ZButton><ZButton type="primary" :disabled="busy || !chosen.length" @click="openSubmit(chosen.map(a=>a.id))"><template #icon><Play :size="15" /></template>检测所选（{{ chosen.length }}）</ZButton></div></div>
       <div class="selection"><ZCheckbox :model-value="allPage" :disabled="!pageCandidates.length || busy" label="选择当前页" @change="selectPage" /><span>已选 {{ chosen.length }} 个 · 匹配 {{ filtered.length }} 个</span><ZButton v-if="selected.length" size="small" variant="text" @click="selected=[]">清空选择</ZButton><ZButton v-if="resultFilter" size="small" variant="text" @click="resultFilter=''">清除结果筛选</ZButton></div>
       <ZTable :columns="columns" :data="visible" :row-key="a=>a.id" :loading="loading" empty-text="没有匹配的账户">
