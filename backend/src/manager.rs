@@ -774,6 +774,13 @@ impl Manager {
                 .map(|d| d.saturating_duration_since(tokio::time::Instant::now()))
                 .unwrap_or_default();
             if remaining < std::time::Duration::from_secs(6) {
+                if self.jobs[i].0.active() && !self.jobs[i].0.samples.is_empty() {
+                    // The sample is already validated and persisted; only
+                    // scoring waits for the next maintenance call. Report the
+                    // wait accurately instead of leaving the UI on "validating".
+                    self.progress
+                        .phase(&self.jobs[i].0.id, "waiting_score", json!({}));
+                }
                 break;
             }
             let job = &self.jobs[i].0;

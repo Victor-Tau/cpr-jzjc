@@ -374,6 +374,24 @@ class Integration(unittest.TestCase):
             self.host.tick();report=self.host.request('api/report?id='+identity)
         self.assertEqual(len(self.host.executions),2) # Warmup + one slow probe; scoring never replays it.
         self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1);self.assertEqual(self.host.closes,0)
+    def test_deferred_scoring_reports_waiting_score(self):
+        # A probe whose answer lands in the last seconds of the maintenance
+        # budget keeps its validated sample; only scoring resumes on the next
+        # call, so progress must say so instead of staying on "validating".
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'waiting-score-warmup'});self.host.tick()
+        for _ in range(4):
+            if all(j['status'] not in ('queued','running') for j in self.host.request('api/jobs')['jobs']):break
+            self.host.tick()
+        identity=self.submit();self.host.model_read_delay=23
+        self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'running');self.assertEqual(report['progress']['stage'],'waiting_score')
+        self.assertEqual(len(report['attempts']),1);self.assertIsNone(report['attempts'][0]['error']);self.assertEqual(len(report['rounds']),0)
+        self.host.model_read_delay=0;self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1)
+        self.assertEqual(len(self.host.executions),2) # Warmup + one slow probe; scoring never replays it.
     def test_unlimited_and_large_timeout_complete_without_overflow(self):
         for seconds in [0,3600,2**40,2**64-1]:
             with self.subTest(seconds=seconds):
