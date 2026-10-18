@@ -29,6 +29,8 @@ class Host:
         self.disable_calls=0;self.fail_disable=False;self.sequence=1
         self.fail_put=None;self.model_read_delay=0
         self.additional_accounts=[]
+        self.groups=[{'id':'group-test','name':'测试组'},{'id':'group-degraded','name':'降智隔离组'}]
+        self.memberships=['group-test'];self.move_calls=0;self.fail_move=False;self.ignore_move=False;self.updates=[]
         env=os.environ.copy();env['MODELTRACE_DEV_PYTHON']=str(ROOT/'.venv/bin/python')
         if RUNTIME_TMPDIR is not None:env['TMPDIR']=str(RUNTIME_TMPDIR)
         command=[str(binary)]
@@ -113,10 +115,29 @@ class Host:
         if method=='host.http.dispatch':
             uri=p['uri']
             if '/accounts/batch-update' in uri:
-                if self.fail_disable:raise SimulatedFault('permission denied')
-                self.enabled=False;self.disable_calls+=1;data={}
+                update=json.loads(body);assert update['accountIds']==['acct-test'];self.updates.append(update)
+                if 'enabled' in update:
+                    assert set(update)=={'accountIds','enabled'} and update['enabled'] is False
+                    if self.fail_disable:raise SimulatedFault('permission denied')
+                    self.enabled=False;self.disable_calls+=1
+                elif 'groupIds' in update:
+                    assert set(update)=={'accountIds','groupIds'}
+                    assert all(any(g['id']==i for g in self.groups) for i in update['groupIds'])
+                    if self.fail_move:raise SimulatedFault('permission denied')
+                    self.move_calls+=1
+                    if not self.ignore_move:self.memberships=update['groupIds']
+                else:raise AssertionError(update)
+                data={}
+            elif uri.startswith('/api/admin/account-groups/options?'):
+                from urllib.parse import urlparse, parse_qs
+                page=int(parse_qs(urlparse(uri).query)['page'][0]);items=self.groups[(page-1)*200:page*200]
+                data={'items':items,'page':{'page':page,'totalPages':(len(self.groups)+199)//200}}
+            elif uri.startswith('/api/admin/accounts/detail?'):
+                from urllib.parse import urlparse, parse_qs
+                account_id=parse_qs(urlparse(uri).query)['accountId'][0];assert account_id=='acct-test'
+                data={'account':{'id':account_id,'groups':[{'id':i,'name':i} for i in self.memberships]}}
             elif uri.startswith('/api/admin/accounts?'):
-                data={'items':[{'id':'acct-test','name':'test-account','email':'user@example.com','provider':'openai','enabled':self.enabled,'status':'normal','planType':'plus','groups':[{'id':'group-test','name':'测试组'}]}],'total':1}
+                data={'items':[{'id':'acct-test','name':'test-account','email':'user@example.com','provider':'openai','enabled':self.enabled,'status':'normal','planType':'plus','groups':[{'id':i,'name':i} for i in self.memberships]}],'total':1}
                 data['items'].extend(self.additional_accounts);data['total']=len(data['items'])
             else:raise AssertionError(uri)
             return {'status':200,'version':'HTTP/1.1','headers':[],'body':{'kind':'handle','handle':self.stream(raw({'code':200,'data':data}))},'response':None,'session':False},b''
@@ -172,6 +193,105 @@ class Integration(unittest.TestCase):
         b=self.host.request('api/bootstrap');c=b['config'];c.update({'keyId':'key-test','retryDelaySeconds':0});c.update(overrides)
         self.host.request('api/config',{'config':c,'revision':b['configRevision']});return c
     def submit(self):return self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'submit-one'})['submitted'][0]
+    def confirmed_config(self, **overrides):
+        cfg=dict(degradedModels=[m['id'] for m in json.loads(self.host.bank)['models']],lowConfidencePercent=0,degradedPercent=0)
+        cfg.update(overrides);return self.config(**cfg)
+
+    def test_defaults_and_saved_v13_config_survive_upgrade(self):
+        fresh=self.host.request('api/bootstrap')['config']
+        self.assertEqual([fresh[k] for k in ['lowConfidencePercent','degradedPercent','confirmationRounds','lowConfidenceRetries','retryDelaySeconds','retentionDays']],[20,90,1,1,10,30])
+        saved=self.config(lowConfidencePercent=60,degradedPercent=80,confirmationRounds=3,lowConfidenceRetries=2,retryDelaySeconds=30,timeoutSeconds=999)
+        self.host.close();state=copy.deepcopy(self.host.state)
+        for key in ['autoMoveGroup','targetGroupId']:state[('control','main')]['value']['config'].pop(key)
+        self.host=Host(state=state);self.addCleanup(self.host.close)
+        loaded=self.host.request('api/bootstrap')['config']
+        for key in saved:
+            if key not in ['autoMoveGroup','targetGroupId']:self.assertEqual(loaded[key],saved[key])
+        self.assertFalse(loaded['autoMoveGroup']);self.assertEqual(loaded['targetGroupId'],'')
+
+    def test_config_import_preview_validates_without_applying(self):
+        before=self.host.request('api/bootstrap');old=copy.deepcopy(before['config'])
+        old.update(lowConfidencePercent=60,confirmationRounds=3)
+        for key in ['autoMoveGroup','targetGroupId']:old.pop(key)
+        preview=self.host.request('api/config/preview',{'config':old})['config']
+        self.assertEqual(preview['confirmationRounds'],3);self.assertFalse(preview['autoMoveGroup'])
+        after=self.host.request('api/bootstrap');self.assertEqual(before['config'],after['config']);self.assertEqual(before['configRevision'],after['configRevision'])
+        for bad in [{'degradedPercent':101},{'unknownField':True},{'confirmationRounds':0},{'autoMoveGroup':True}]:
+            cfg=copy.deepcopy(before['config']);cfg.update(bad)
+            self.host.request('api/config/preview',{'config':cfg},ok=False)
+        self.assertEqual(self.host.request('api/bootstrap')['config'],before['config'])
+
+    def test_empty_groups_and_group_pagination(self):
+        self.host.groups=[{'id':f'group-{i}','name':f'组{i}'} for i in range(201)]
+        groups=self.host.request('api/bootstrap')['groups'];self.assertEqual(len(groups),201)
+        self.config(autoMoveGroup=True,targetGroupId='group-200')
+        cfg=self.host.request('api/bootstrap');cfg['config']['targetGroupId']='deleted'
+        self.host.request('api/config',{'config':cfg['config'],'revision':cfg['configRevision']},ok=False)
+
+    def test_disable_and_move_independent_combinations(self):
+        for disable,move in [(False,False),(True,False),(False,True),(True,True)]:
+            with self.subTest(disable=disable,move=move):
+                if self.host.executions:self.host.close();self.host=Host();self.addCleanup(self.host.close)
+                self.confirmed_config(autoDisable=disable,autoMoveGroup=move,targetGroupId='group-degraded')
+                identity=self.submit();self.host.tick()
+                before=self.host.request('api/report?id='+identity)
+                self.assertEqual(before['verdict'],'degraded');self.assertEqual(len(before['rounds']),1)
+                if disable or move:self.host.request('api/delete',{'id':identity},ok=False)
+                self.host.tick(2)
+                report=self.host.request('api/report?id='+identity)
+                self.assertEqual(report['disableState'],'disabled' if disable else 'none')
+                self.assertEqual(report['groupState'],'moved' if move else 'none')
+                self.assertEqual(self.host.enabled,not disable);self.assertEqual(self.host.move_calls,int(move));self.assertEqual(len(self.host.executions),1)
+                if move:self.assertEqual(self.host.memberships,['group-degraded'])
+
+    def test_action_failure_does_not_block_other_action_or_reprobe(self):
+        for failure in ['disable','move']:
+            with self.subTest(failure=failure):
+                if self.host.executions:self.host.close();self.host=Host();self.addCleanup(self.host.close)
+                self.confirmed_config(autoDisable=True,autoMoveGroup=True,targetGroupId='group-degraded')
+                identity=self.submit();setattr(self.host,'fail_'+failure,True);self.host.tick(3)
+                report=self.host.request('api/report?id='+identity)
+                self.assertEqual(report['disableState'],'failed' if failure=='disable' else 'disabled')
+                self.assertEqual(report['groupState'],'failed' if failure=='move' else 'moved')
+                setattr(self.host,'fail_'+failure,False)
+                self.host.request('api/retry-'+('disable' if failure=='disable' else 'group'),{'id':identity})
+                report=self.host.request('api/report?id='+identity)
+                self.assertEqual(report['disableState'],'disabled');self.assertEqual(report['groupState'],'moved');self.assertEqual(len(self.host.executions),1)
+
+    def test_move_verification_retry_is_idempotent_and_uses_snapshot(self):
+        self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded');identity=self.submit();self.host.tick()
+        self.config(autoMoveGroup=False,targetGroupId='group-test')
+        self.host.ignore_move=True;self.host.tick()
+        self.assertEqual(self.host.request('api/report?id='+identity)['groupState'],'failed')
+        self.host.ignore_move=False;self.host.memberships=['group-degraded']
+        self.host.request('api/retry-group',{'id':identity})
+        self.assertEqual(self.host.request('api/report?id='+identity)['groupState'],'moved');self.assertEqual(self.host.move_calls,1);self.assertTrue(self.host.enabled)
+
+    def test_deleted_group_and_identity_change_prevent_mutations(self):
+        for changed in ['group','identity']:
+            with self.subTest(changed=changed):
+                if self.host.executions:self.host.close();self.host=Host();self.addCleanup(self.host.close)
+                self.confirmed_config(autoDisable=False,autoMoveGroup=True,targetGroupId='group-degraded')
+                identity=self.submit();self.host.tick()
+                if changed=='group':self.host.groups=self.host.groups[:1]
+                else:self.host.identity='replaced'
+                self.host.tick();self.assertEqual(self.host.request('api/report?id='+identity)['groupState'],'failed');self.assertEqual(self.host.updates,[])
+
+    def test_interrupted_move_requires_retry_without_duplicate_update(self):
+        self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded');identity=self.submit();self.host.tick()
+        self.host.fail_put=lambda key,value:key[0]=='jobs' and value.get('groupState')=='moved'
+        with self.assertRaises(AssertionError):self.host.tick()
+        self.host.fail_put=None;self.host.tick()
+        self.assertEqual(self.host.request('api/report?id='+identity)['groupState'],'failed')
+        self.host.request('api/retry-group',{'id':identity})
+        self.assertEqual(self.host.request('api/report?id='+identity)['groupState'],'moved');self.assertEqual(self.host.move_calls,1);self.assertEqual(len(self.host.executions),1)
+
+    def test_no_actions_for_non_degraded_verdict(self):
+        self.config(autoDisable=True,autoMoveGroup=True,targetGroupId='group-degraded',lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();self.host.tick(3)
+        report=self.host.request('api/report?id='+identity)
+        self.assertNotEqual(report['verdict'],'degraded');self.assertEqual(self.host.updates,[])
+
     def test_registration_and_queries(self):
         _,payload=self.host.call('management.register',stage='registration');registration=json.loads(payload);self.assertIn('api/report',[r['path'] for r in registration['routes']])
         self.assertEqual(self.host.request('api/accounts')['accounts'][0]['groups'][0]['id'],'group-test')
@@ -197,9 +317,16 @@ class Integration(unittest.TestCase):
                 self.assertEqual(set(params),{'account_id','client_key_id','model','protocol','operation','provider'})
     def test_default_timeout_allows_response_after_twenty_seconds(self):
         c=self.config(lowConfidencePercent=0,degradedPercent=100);self.assertEqual(c['timeoutSeconds'],120)
+        # Isolate the configured request timeout from cold extraction, which
+        # also consumes the host's 30-second budget (covered by artifact tests).
+        self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'timeout-warmup'});self.host.tick()
         self.host.model_read_delay=21;identity=self.submit();self.host.tick()
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(len(report['attempts']),1);self.assertIsNone(report['attempts'][0]['error'])
+        if report['status']=='running':
+            self.assertFalse(report['pendingProbe']);self.assertEqual(len(report['samples']),1)
+            self.host.tick();report=self.host.request('api/report?id='+identity)
+        self.assertEqual(len(self.host.executions),2) # Warmup + one slow probe; scoring never replays it.
         self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1);self.assertEqual(self.host.closes,0)
     def test_unlimited_and_large_timeout_complete_without_overflow(self):
         for seconds in [0,3600,2**40,2**64-1]:
@@ -249,7 +376,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.host.request('api/report?id='+identity)['status'],'failed');self.assertEqual(len(self.host.executions),1);self.assertEqual(self.host.disable_calls,0)
     def test_three_round_confirmation_and_disable_retry(self):
         models=[m['id'] for m in json.loads(self.host.bank)['models']]
-        self.config(autoDisable=True,degradedModels=models,lowConfidencePercent=0,degradedPercent=0)
+        self.config(autoDisable=True,degradedModels=models,lowConfidencePercent=0,degradedPercent=0,confirmationRounds=3)
         identity=self.submit();self.host.tick(3)
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['verdict'],'degraded');self.assertEqual(len(report['rounds']),3);self.assertEqual(self.host.disable_calls,0)

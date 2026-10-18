@@ -54,6 +54,8 @@ pub struct Config {
     pub low_confidence_retries: u32,
     pub retry_delay_seconds: u32,
     pub auto_disable: bool,
+    pub auto_move_group: bool,
+    pub target_group_id: String,
     pub retention_days: u32,
     pub schedule: Schedule,
     pub auto_check_updates: bool,
@@ -71,12 +73,14 @@ impl Default for Config {
             timeout_seconds: 120,
             degraded_models: vec!["gpt-5.6-luna".into()],
             aliases: BTreeMap::new(),
-            low_confidence_percent: 60.0,
-            degraded_percent: 80.0,
-            confirmation_rounds: 3,
-            low_confidence_retries: 2,
-            retry_delay_seconds: 30,
+            low_confidence_percent: 20.0,
+            degraded_percent: 90.0,
+            confirmation_rounds: 1,
+            low_confidence_retries: 1,
+            retry_delay_seconds: 10,
             auto_disable: false,
+            auto_move_group: false,
+            target_group_id: String::new(),
             retention_days: 30,
             schedule: Schedule::default(),
             auto_check_updates: false,
@@ -87,6 +91,13 @@ impl Default for Config {
 }
 impl Config {
     pub fn validate(&self, model_ids: &[String]) -> Result<(), String> {
+        if self.target_group_id.len() > 128
+            || self.target_group_id.chars().any(char::is_whitespace)
+            || self.target_group_id.chars().any(char::is_control)
+            || (self.auto_move_group && self.target_group_id.is_empty())
+        {
+            return Err("开启降智移组前请选择目标分组".into());
+        }
         if self.request_model.trim().is_empty()
             || self.request_model.len() > 128
             || self.key_id.len() > 128
@@ -335,8 +346,52 @@ pub struct Job {
     pub low_retries_used: u32,
     pub pending_probe: bool,
     pub disable_state: String,
+    #[serde(default)]
+    pub disable_error: Option<String>,
+    #[serde(default = "no_action")]
+    pub group_state: String,
+    #[serde(default)]
+    pub group_error: Option<String>,
+}
+fn no_action() -> String {
+    "none".into()
 }
 impl Job {
+    pub fn actions_pending(&self) -> bool {
+        [&self.disable_state, &self.group_state]
+            .iter()
+            .any(|s| ["pending", "attempting"].contains(&s.as_str()))
+    }
+    pub fn action_message(&mut self) {
+        let mut parts = vec!["已确认降智".to_string()];
+        for (state, pending, done, failed, error) in [
+            (
+                &self.disable_state,
+                "等待关闭调度",
+                "已关闭账户调度",
+                "关闭调度失败",
+                &self.disable_error,
+            ),
+            (
+                &self.group_state,
+                "等待移入指定分组",
+                "已移入指定分组",
+                "移组失败",
+                &self.group_error,
+            ),
+        ] {
+            match state.as_str() {
+                "pending" | "attempting" => parts.push(pending.into()),
+                "disabled" | "moved" => parts.push(done.into()),
+                "failed" => parts.push(format!(
+                    "{failed}：{}",
+                    error.as_deref().unwrap_or("请检查宿主状态后重试")
+                )),
+                _ => {}
+            }
+        }
+        self.message = parts.join("；");
+    }
     pub fn active(&self) -> bool {
         ["queued", "running"].contains(&self.status.as_str())
     }
@@ -397,6 +452,9 @@ mod tests {
     #[test]
     fn thresholds_and_confirmation() {
         let mut j = job();
+        j.config.low_confidence_percent = 60.0;
+        j.config.degraded_percent = 80.0;
+        j.config.confirmation_rounds = 3;
         assert_eq!(j.classify(&score("gpt-5.6-luna", 0.599)), "low_confidence");
         assert_eq!(j.classify(&score("gpt-5.6-luna", 0.60)), "inconclusive");
         assert_eq!(j.classify(&score("gpt-5.6-luna", 0.80)), "suspected");
@@ -404,6 +462,20 @@ mod tests {
         assert_eq!(j.classify(&score("gpt-5.6-luna", 0.95)), "degraded");
         assert_eq!(j.classify(&score("gpt-6-sol", 0.95)), "no_match");
         assert_eq!(j.consecutive, 0);
+    }
+    #[test]
+    fn v14_defaults_and_legacy_records() {
+        let mut j = job(); // A 1.3 record without group/action error fields.
+        assert_eq!(j.group_state, "none");
+        assert!(!j.actions_pending());
+        assert_eq!(j.config.low_confidence_retries, 1);
+        assert_eq!(j.config.retry_delay_seconds, 10);
+        assert_eq!(j.config.retention_days, 30);
+        assert!(!j.config.auto_move_group);
+        assert_eq!(j.classify(&score("gpt-5.6-luna", 0.199)), "low_confidence");
+        assert_eq!(j.classify(&score("gpt-5.6-luna", 0.20)), "inconclusive");
+        assert_eq!(j.classify(&score("gpt-5.6-luna", 0.899)), "inconclusive");
+        assert_eq!(j.classify(&score("gpt-5.6-luna", 0.90)), "degraded");
     }
     #[test]
     fn request_alias_exemption() {

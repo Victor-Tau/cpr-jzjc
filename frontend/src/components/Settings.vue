@@ -5,16 +5,65 @@ import { ZInput } from '@codex-proxy/ui/input'
 import { ZSelect } from '@codex-proxy/ui/select'
 import { ZCheckbox } from '@codex-proxy/ui/checkbox'
 import { api, date } from '../api'
-import type { Account, Banks, Config } from '../types'
-const props = defineProps<{ config: Config; revision: number; banks: Banks; keys: { id: string; name: string }[]; accounts: Account[]; selected: string[]; nextDue: number | null; scheduleError: string | null; busy: boolean }>()
+import type { Account, Banks, Config, Group } from '../types'
+const props = defineProps<{ config: Config; revision: number; banks: Banks; keys: { id: string; name: string }[]; accounts: Account[]; groups: Group[]; selected: string[]; nextDue: number | null; scheduleError: string | null; busy: boolean }>()
 const emit = defineEmits<{ save: [config: Config]; bank: [operation: 'check' | 'apply' | 'rollback' | 'builtin']; error: [message: string] }>()
 const cfg = ref<Config>(JSON.parse(JSON.stringify(props.config)))
 const aliases = ref(Object.entries(cfg.value.aliases).map(([a,b]) => `${a}=${b}`).join('\n'))
 const models = ref<string[]>([])
+const configFile = ref<HTMLInputElement>()
+const importing = ref(false)
+const fileNotice = ref('')
+const exportedJson = ref('')
+const exportedField = ref<HTMLTextAreaElement>()
+const targetOptions = computed(() => props.groups.map(g => ({ value:g.id, label:g.name })))
+function useDefaults() {
+  Object.assign(cfg.value, {lowConfidencePercent:20, degradedPercent:90, confirmationRounds:1, lowConfidenceRetries:1, retryDelaySeconds:10, retentionDays:30})
+  fileNotice.value='已填入 1.4 默认规则，保存后生效。'
+}
+function exportConfig() {
+  const data = { format:'modeltrace-health-config', version:1, pluginId:'personal.modeltrace-health', config:props.config }
+  exportedJson.value=JSON.stringify(data,null,2)+'\n'
+  // RS embeds this page with sandbox="allow-scripts", which blocks downloads.
+  // Always expose the JSON so backup also works inside that isolated frame.
+  if(window.top===window) {
+    const url=URL.createObjectURL(new Blob([exportedJson.value],{type:'application/json'}))
+    const link=document.createElement('a'); link.href=url; link.download='modeltrace-health-config.json'; link.click()
+    setTimeout(()=>URL.revokeObjectURL(url),1000)
+  }
+  fileNotice.value='已导出当前已保存的参数；可复制下方 JSON 并保存为 modeltrace-health-config.json。'
+}
+async function copyConfig() {
+  try {
+    if(navigator.clipboard) { await navigator.clipboard.writeText(exportedJson.value) }
+    else { exportedField.value?.select(); if(!document.execCommand('copy'))throw new Error('copy failed') }
+    fileNotice.value='配置已复制，请保存为 modeltrace-health-config.json。'
+  } catch {
+    exportedField.value?.select()
+    fileNotice.value='请复制已选中的 JSON，并保存为 modeltrace-health-config.json。'
+  }
+}
+async function importConfig(event:Event) {
+  const input=event.target as HTMLInputElement, file=input.files?.[0]
+  if(!file)return
+  importing.value=true; fileNotice.value=''
+  try {
+    if(file.size>250000)throw new Error('配置文件不能超过250KB')
+    const data=JSON.parse(await file.text())
+    if(!data || typeof data!=='object' || Array.isArray(data))throw new Error('配置文件须为JSON对象')
+    const wrapped=Object.hasOwn(data,'format')
+    if(wrapped && (data.format!=='modeltrace-health-config' || data.version!==1 || data.pluginId!=='personal.modeltrace-health'))throw new Error('配置文件类型或版本不受支持')
+    const result=await api.previewConfig(wrapped ? data.config : data)
+    cfg.value=result.config
+    aliases.value=Object.entries(cfg.value.aliases).map(([a,b])=>`${a}=${b}`).join('\n')
+    fileNotice.value='配置已载入表单，请核对计量 Key、目标分组和定时范围，再保存。'
+  } catch(e) { emit('error',(e as Error).message) }
+  finally { importing.value=false; input.value='' }
+}
 const loadingModels = ref(false)
 const modelOptions = computed(() => models.value.map(m => ({ value: m, label: m })))
 const degradedOptions = computed(() => props.banks.active.models.map(m => ({ value: m.id, label: m.label })))
-const groupOptions = computed(() => [{ value: '', label: '全部分组' }, { value: '__ungrouped__', label: '未分组' }, ...Array.from(new Map(props.accounts.flatMap(a => a.groups).map(g => [g.id,g])).values()).map(g => ({ value: g.id, label: g.name }))])
+const groupOptions = computed(() => [{ value: '', label: '全部分组' }, { value: '__ungrouped__', label: '未分组' }, ...props.groups.map(g => ({ value: g.id, label: g.name }))])
 const planOptions = computed(() => [{ value: '', label: '全部订阅' }, ...Array.from(new Set(props.accounts.map(a => a.planType || 'unknown'))).sort().map(p => ({ value: p, label: p }))])
 const statusOptions = [{ value: '', label: '全部已启用状态' }, ...['normal','error','quota_exhausted','rate_limited'].map(value => ({ value, label: ({ normal:'正常',error:'异常',quota_exhausted:'额度耗尽',rate_limited:'限流' } as Record<string,string>)[value]! }))]
 const number = (event: Event, key: keyof Config) => { (cfg.value as any)[key] = Number((event.target as HTMLInputElement).value) }
@@ -32,7 +81,8 @@ function save() {
 
 <template>
   <form @submit.prevent="save">
-    <div class="section-heading"><div><h2>检测参数</h2><p>手动与定时检测共用。保存后用于新任务，已运行任务继续使用原配置。</p></div><ZButton type="primary" :loading="busy" @click="save">保存全部参数</ZButton></div>
+    <div class="section-heading"><div><h2>检测参数</h2><p>手动与定时检测共用。保存后用于新任务，已运行任务继续使用原配置。</p></div><ZButton type="primary" :loading="busy" :disabled="importing" @click="save">保存全部参数</ZButton></div>
+    <section class="panel"><div class="section-heading"><div><h3>配置备份</h3><p>参数自动保存在宿主中，更新同一插件实例会沿用。重装或迁移前可导出 JSON 文件。</p></div><div class="inline"><ZButton :disabled="busy || importing" @click="exportConfig">导出配置</ZButton><ZButton :disabled="busy" :loading="importing" @click="configFile?.click()">导入配置</ZButton></div></div><input ref="configFile" type="file" accept=".json,application/json" aria-label="配置文件" hidden @change="importConfig"><p>导出已保存参数，不含 API 密钥或账号凭据；导入后核对并保存才会生效。</p><p v-if="fileNotice" role="status">{{ fileNotice }}</p><div v-if="exportedJson"><div class="inline"><ZButton :disabled="busy" @click="copyConfig">复制配置 JSON</ZButton><ZButton variant="text" @click="exportedJson=''">收起备份</ZButton></div><textarea ref="exportedField" :value="exportedJson" readonly rows="8" aria-label="导出的配置JSON" spellcheck="false" /></div></section>
     <section class="panel form-grid">
       <label>计量 Key<ZSelect v-model="cfg.keyId" :options="keys.map(k => ({ value:k.id,label:k.name }))" placeholder="选择已有 Key" aria-label="计量Key" /></label>
       <label>请求模型<ZInput v-model="cfg.requestModel" placeholder="gpt-6.1-sol" aria-label="请求模型" /></label>
@@ -43,7 +93,7 @@ function save() {
       <label>单次请求超时（秒）<input type="number" min="0" step="1" :value="cfg.timeoutSeconds" @input="number($event,'timeoutSeconds')"><small>默认120秒，0表示不设请求超时。执行时会提前预留校验和保存时间；RS 3.29.1 的后台总预算为30秒，较长请求需宿主支持。</small></label>
     </section>
 
-    <section class="panel"><h3>降智与复测规则</h3><p>请求模型不在降级名单内，最高候选命中名单且概率达到阈值时，进入连续复测确认。</p>
+    <section class="panel"><div class="section-heading"><h3>降智与复测规则</h3><ZButton :disabled="busy" @click="useDefaults">使用 1.4 默认规则</ZButton></div><p>请求模型不在降级名单内，最高候选命中名单且概率达到阈值时，按配置轮数确认。</p>
       <div class="form-grid">
         <div class="field wide"><span>降级模型名单</span><div class="checks"><ZCheckbox v-for="m in degradedOptions" :key="m.value" :model-value="cfg.degradedModels.includes(m.value)" :label="m.label" @change="checked => cfg.degradedModels = checked ? [...cfg.degradedModels,m.value] : cfg.degradedModels.filter(x => x !== m.value)" /></div></div>
         <label>低置信度复测阈值（%）<input type="number" min="0" max="100" step="0.1" :value="cfg.lowConfidencePercent" @input="number($event,'lowConfidencePercent')"><small>最高候选概率低于此值时自动复测。</small></label>
@@ -54,7 +104,7 @@ function save() {
         <label>历史保留（天）<input type="number" min="1" max="365" :value="cfg.retentionDays" @input="number($event,'retentionDays')"></label>
         <label class="wide">模型别名（每行：请求名称=指纹库模型ID）<textarea v-model="aliases" rows="3" placeholder="my-luna=gpt-5.6-luna" /></label>
       </div>
-      <div class="callout"><ZCheckbox v-model="cfg.autoDisable" label="确认降智后自动关闭该账户调度" /><p>仅在连续复测确认后停用账户；由管理员在宿主中恢复。</p></div>
+      <div class="callout"><div class="checks"><ZCheckbox v-model="cfg.autoDisable" label="确认降智后自动关闭该账户调度" /><ZCheckbox v-model="cfg.autoMoveGroup" label="确认降智后移入指定分组" /></div><label v-if="cfg.autoMoveGroup" class="action-target">目标分组<ZSelect v-model="cfg.targetGroupId" :options="targetOptions" placeholder="选择已有分组" aria-label="降智目标分组" /></label><p>两项可同时开启，达到确认轮数后分别执行。移组会将原有分组替换为目标分组；停用后由管理员在宿主中恢复。</p></div>
     </section>
 
     <section class="panel"><div class="section-heading"><h3>自动定时检测</h3><ZCheckbox v-model="cfg.schedule.enabled" label="开启定时检测" /></div>

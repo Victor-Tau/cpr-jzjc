@@ -22,10 +22,12 @@ fn registration() -> ManagementRegistration {
         ("GET", "api/progress"),
         ("GET", "api/report"),
         ("POST", "api/config"),
+        ("POST", "api/config/preview"),
         ("POST", "api/submit"),
         ("POST", "api/cancel"),
         ("POST", "api/delete"),
         ("POST", "api/retry-disable"),
+        ("POST", "api/retry-group"),
         ("POST", "api/banks/check"),
         ("POST", "api/banks/apply"),
         ("POST", "api/banks/rollback"),
@@ -81,7 +83,7 @@ async fn handle(
     };
     match (call.request.method.as_str(), call.request.path.as_str()) {
         ("GET", "api/bootstrap") => Ok(
-            json!({"config":m.control.config,"configRevision":m.control.config_revision,"banks":m.bank_status(),"keys":host::keys(h).await?,"jobs":m.summaries(),"nextDue":m.control.next_due,"scheduleError":m.control.schedule_error,"lastScheduleAt":m.control.last_schedule_at}),
+            json!({"config":m.control.config,"configRevision":m.control.config_revision,"banks":m.bank_status(),"keys":host::keys(h).await?,"groups":host::groups(h).await?,"jobs":m.summaries(),"nextDue":m.control.next_due,"scheduleError":m.control.schedule_error,"lastScheduleAt":m.control.last_schedule_at}),
         ),
         ("GET", "api/accounts") => {
             let offset = query("offset").parse::<usize>().unwrap_or(0);
@@ -95,7 +97,7 @@ async fn handle(
             )
         }
         ("GET", "api/models") => {
-            let models:gateway_plugin_sdk::call::host::ModelListResult=host::meta(h,"host.models.list",json!({"client_key_id":query("keyId"),"protocol":"openai","client_version":"modeltrace-health/1.3.0"})).await?;
+            let models:gateway_plugin_sdk::call::host::ModelListResult=host::meta(h,"host.models.list",json!({"client_key_id":query("keyId"),"protocol":"openai","client_version":"modeltrace-health/1.4.0"})).await?;
             Ok(json!({"models":models.models}))
         }
         ("GET", "api/progress") => m
@@ -131,6 +133,19 @@ async fn handle(
             .await?;
             Ok(json!({"revision":m.control.config_revision,"config":m.control.config}))
         }
+        ("POST", "api/config/preview") => {
+            let cfg: domain::Config = serde_json::from_value(body["config"].clone())
+                .map_err(|_| host::fault("配置字段格式无效"))?;
+            cfg.validate(
+                &m.active_bank()
+                    .models
+                    .iter()
+                    .map(|model| model.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(host::fault)?;
+            Ok(json!({"config":cfg}))
+        }
         ("POST", "api/submit") => {
             let ids: Vec<String> = serde_json::from_value(body["accountIds"].clone())
                 .map_err(|_| host::fault("账户列表格式错误"))?;
@@ -161,6 +176,16 @@ async fn handle(
                 .position(|(j, _)| j.id == id && j.disable_state == "failed")
                 .ok_or_else(|| host::fault("没有可重试的停用操作"))?;
             m.disable(h, i).await?;
+            Ok(json!({"ok":true}))
+        }
+        ("POST", "api/retry-group") => {
+            let id = body["id"].as_str().unwrap_or("");
+            let i = m
+                .jobs
+                .iter()
+                .position(|(j, _)| j.id == id && j.group_state == "failed")
+                .ok_or_else(|| host::fault("没有可重试的移组操作"))?;
+            m.move_group(h, i).await?;
             Ok(json!({"ok":true}))
         }
         ("POST", "api/banks/check") => {

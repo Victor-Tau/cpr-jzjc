@@ -1,4 +1,4 @@
-import type { Account, Banks, Config, Job, Report } from './types'
+import type { Account, Banks, Config, Group, Job, Report } from './types'
 
 export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const host = window.codexProxyPlugin
@@ -10,7 +10,7 @@ export async function request<T>(method: string, path: string, body?: unknown): 
   if (reply.status < 200 || reply.status >= 300) throw new Error(value?.error?.message || `请求失败（HTTP ${reply.status}）`)
   return value as T
 }
-export interface Bootstrap { config: Config; configRevision: number; keys: { id: string; name: string }[]; jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null }
+export interface Bootstrap { config: Config; configRevision: number; groups: Group[]; keys: { id: string; name: string }[]; jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null }
 export const api = {
   bootstrap: () => request<Bootstrap>('GET', 'api/bootstrap'),
   accounts: async () => {
@@ -28,10 +28,12 @@ export const api = {
   jobs: () => request<{ jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null }>('GET', 'api/jobs'),
   report: (id: string) => request<Report>('GET', `api/report?id=${encodeURIComponent(id)}`),
   save: (config: Config, revision: number) => request<{ revision: number; config: Config }>('POST', 'api/config', { config, revision }),
+  previewConfig: (config: unknown) => request<{ config: Config }>('POST', 'api/config/preview', { config }),
   submit: (accountIds: string[], requestId: string) => request('POST', 'api/submit', { accountIds, requestId }),
   cancel: (id?: string) => request('POST', 'api/cancel', { id }),
   delete: (id: string) => request('POST', 'api/delete', { id }),
   retryDisable: (id: string) => request('POST', 'api/retry-disable', { id }),
+  retryGroup: (id: string) => request('POST', 'api/retry-group', { id }),
   bank: (operation: 'check' | 'apply' | 'rollback' | 'builtin') => request<Banks>('POST', `api/banks/${operation}`, {}),
 }
 export const date = (value: number | string | null | undefined) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'

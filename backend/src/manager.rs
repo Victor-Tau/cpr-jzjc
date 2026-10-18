@@ -128,13 +128,22 @@ impl Manager {
                 }
                 if job.disable_state == "attempting" {
                     job.disable_state = "failed".into();
-                    job.message = "关闭调度时插件中断，需检查宿主状态或重试停用".into();
+                    job.disable_error = Some("操作时插件中断，请检查宿主状态或重试".into());
+                    job.action_message();
+                }
+                if job.group_state == "attempting" {
+                    job.group_state = "failed".into();
+                    job.group_error = Some("操作时插件中断，请检查宿主状态或重试".into());
+                    job.action_message();
                 }
                 self.jobs.push((job, Some(r.version)));
             }
         }
         for i in 0..self.jobs.len() {
-            if self.jobs[i].0.status == "interrupted" || self.jobs[i].0.disable_state == "failed" {
+            if self.jobs[i].0.status == "interrupted"
+                || self.jobs[i].0.disable_state == "failed"
+                || self.jobs[i].0.group_state == "failed"
+            {
                 self.save_job(host, i).await?;
             }
         }
@@ -170,7 +179,7 @@ impl Manager {
         json!({"active":self.active_bank(),"previous":self.control.previous_bank.as_ref().and_then(|h|self.control.banks.iter().find(|b|&b.hash==h)),"builtin":banks::builtin(),"update":self.control.update,"engineCommit":banks::engine_commit()})
     }
     pub fn summaries(&self) -> Vec<Value> {
-        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state})).collect()
+        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state})).collect()
     }
     pub async fn set_config(
         &mut self,
@@ -199,6 +208,7 @@ impl Manager {
         {
             return Err(fault("所选Key不存在或已停用"));
         }
+        Self::validate_target_group(host, &config).await?;
         let schedule_changed = serde_json::to_value(&config.schedule).unwrap()
             != serde_json::to_value(&self.control.config.schedule).unwrap();
         if schedule_changed {
@@ -239,6 +249,7 @@ impl Manager {
         if cfg.key_id.is_empty() {
             return Err(fault("请先在参数配置页选择计量Key"));
         }
+        Self::validate_target_group(host, &cfg).await?;
         let rows = host::accounts(host).await?;
         let mut selected = vec![];
         for id in &ids {
@@ -307,6 +318,9 @@ impl Manager {
                 low_retries_used: 0,
                 pending_probe: false,
                 disable_state: "none".into(),
+                disable_error: None,
+                group_state: "none".into(),
+                group_error: None,
             };
             // A deterministic key makes replay after an interrupted submission idempotent.
             let old = host::state_get(host, "jobs", &id).await?;
@@ -341,10 +355,8 @@ impl Manager {
             .iter()
             .position(|(j, _)| j.id == id)
             .ok_or_else(|| fault("任务不存在"))?;
-        if self.jobs[i].0.active()
-            || ["pending", "attempting"].contains(&self.jobs[i].0.disable_state.as_str())
-        {
-            return Err(fault("请先取消活动检测，或等待关闭调度操作结束"));
+        if self.jobs[i].0.active() || self.jobs[i].0.actions_pending() {
+            return Err(fault("请先取消活动检测，或等待调度与移组操作结束"));
         }
         self.control.job_ids.retain(|x| x != id);
         self.save(host).await?;
@@ -363,7 +375,7 @@ impl Manager {
         let mut removed = vec![];
         for (j, _) in &self.jobs {
             if !j.active()
-                && !["pending", "attempting"].contains(&j.disable_state.as_str())
+                && !j.actions_pending()
                 && (j.finished_at.unwrap_or(j.created_at) < cutoff || bytes > 12 * 1024 * 1024)
             {
                 bytes = bytes.saturating_sub(serde_json::to_vec(j).unwrap().len());
@@ -538,25 +550,42 @@ impl Manager {
         }
         Ok(ident)
     }
+    async fn validate_target_group(host: &HostClient, config: &Config) -> Result<(), PluginFault> {
+        if config.auto_move_group
+            && !host::groups(host)
+                .await?
+                .iter()
+                .any(|g| g.id == config.target_group_id)
+        {
+            return Err(fault("降智目标分组不存在，请重新选择"));
+        }
+        Ok(())
+    }
+    // Disabled accounts remain eligible for moving: both actions can be enabled.
+    async fn action_account(host: &HostClient, job: &Job) -> Result<bool, PluginFault> {
+        let a = host::runtime(host, &job.account_id).await?;
+        if a.account_id != job.account_id
+            || a.provider_id != "openai"
+            || job.identity.as_ref().is_none_or(|id| {
+                serde_json::to_value(id).unwrap()
+                    != serde_json::to_value(host::identity(&a)).unwrap()
+            })
+        {
+            return Err(fault("账户身份已变化，调度操作已终止"));
+        }
+        Ok(a.enabled)
+    }
     pub async fn disable(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
         if self.jobs[i].0.verdict != "degraded" {
             return Err(fault("只有已确认降智的任务可执行停用"));
         }
         self.jobs[i].0.disable_state = "attempting".into();
+        self.jobs[i].0.disable_error = None;
+        self.jobs[i].0.action_message();
         self.save_job(host, i).await?;
         let result = async {
             let j = &self.jobs[i].0;
-            let a = host::runtime(host, &j.account_id).await?;
-            if a.account_id != j.account_id
-                || a.provider_id != "openai"
-                || j.identity.as_ref().is_none_or(|id| {
-                    serde_json::to_value(id).unwrap()
-                        != serde_json::to_value(host::identity(&a)).unwrap()
-                })
-            {
-                return Err(fault("账户身份已变化，未关闭调度"));
-            }
-            if a.enabled {
+            if Self::action_account(host, j).await? {
                 host::admin(
                     host,
                     "POST",
@@ -565,23 +594,61 @@ impl Manager {
                 )
                 .await?;
             }
-            let after = host::runtime(host, &j.account_id).await?;
-            if after.enabled {
+            if Self::action_account(host, j).await? {
                 return Err(fault("账户关闭调度后校验未通过"));
             }
             Ok(())
         }
         .await;
         match result {
-            Ok(()) => {
-                self.jobs[i].0.disable_state = "disabled".into();
-                self.jobs[i].0.message = "已确认降智并关闭账户调度；请由管理员恢复".into();
-            }
+            Ok(()) => self.jobs[i].0.disable_state = "disabled".into(),
             Err(e) => {
                 self.jobs[i].0.disable_state = "failed".into();
-                self.jobs[i].0.message = format!("已确认降智；关闭调度失败：{}", e.message);
+                self.jobs[i].0.disable_error = Some(e.message);
             }
         }
+        self.jobs[i].0.action_message();
+        self.save_job(host, i).await
+    }
+    pub async fn move_group(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
+        if self.jobs[i].0.verdict != "degraded" || !self.jobs[i].0.config.auto_move_group {
+            return Err(fault("只有已确认降智且开启移组的任务可执行移组"));
+        }
+        self.jobs[i].0.group_state = "attempting".into();
+        self.jobs[i].0.group_error = None;
+        self.jobs[i].0.action_message();
+        self.save_job(host, i).await?;
+        let result = async {
+            let j = &self.jobs[i].0;
+            Self::validate_target_group(host, &j.config).await?;
+            Self::action_account(host, j).await?;
+            let target = vec![j.config.target_group_id.clone()];
+            if host::account_groups(host, &j.account_id).await? != target {
+                // Replace memberships without changing enabled or other account settings.
+                Self::action_account(host, j).await?;
+                host::admin(
+                    host,
+                    "POST",
+                    "/api/admin/accounts/batch-update",
+                    Some(json!({"accountIds":[j.account_id],"groupIds":target})),
+                )
+                .await?;
+            }
+            Self::action_account(host, j).await?;
+            if host::account_groups(host, &j.account_id).await? != target {
+                return Err(fault("账户移组后校验未通过"));
+            }
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => self.jobs[i].0.group_state = "moved".into(),
+            Err(e) => {
+                self.jobs[i].0.group_state = "failed".into();
+                self.jobs[i].0.group_error = Some(e.message);
+            }
+        }
+        self.jobs[i].0.action_message();
         self.save_job(host, i).await
     }
     pub async fn tick(
@@ -609,6 +676,13 @@ impl Manager {
             .position(|(j, _)| j.disable_state == "pending")
         {
             return self.disable(host, i).await;
+        }
+        if let Some(i) = self
+            .jobs
+            .iter()
+            .position(|(j, _)| j.group_state == "pending")
+        {
+            return self.move_group(host, i).await;
         }
         if self.control.config.schedule.enabled && self.control.next_due.is_some_and(|t| t <= now())
         {
@@ -755,10 +829,14 @@ impl Manager {
             j.round_attempts = 0;
             match verdict {
                 "degraded" => {
-                    j.finish("completed", "degraded", "连续复测确认降智", now());
+                    j.finish("completed", "degraded", "已确认降智", now());
                     if j.config.auto_disable {
                         j.disable_state = "pending".into();
                     }
+                    if j.config.auto_move_group {
+                        j.group_state = "pending".into();
+                    }
+                    j.action_message();
                 }
                 "suspected" | "low_confidence" => {
                     let exhausted = j.rounds.len() as u32

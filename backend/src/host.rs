@@ -207,6 +207,67 @@ pub async fn accounts(host: &HostClient) -> Result<Vec<Account>, PluginFault> {
     }
     Err(fault("账户数量超过100000"))
 }
+pub async fn groups(host: &HostClient) -> Result<Vec<Group>, PluginFault> {
+    let mut result = vec![];
+    let mut seen = BTreeSet::new();
+    for page in 1..=1000 {
+        let data = admin(
+            host,
+            "GET",
+            &format!("/api/admin/account-groups/options?page={page}&pageSize=200"),
+            None,
+        )
+        .await?;
+        let items = data["items"]
+            .as_array()
+            .ok_or_else(|| fault("分组列表缺少items"))?;
+        for item in items {
+            let group: Group =
+                serde_json::from_value(item.clone()).map_err(|_| fault("分组信息无效"))?;
+            if !seen.insert(group.id.clone()) {
+                return Err(fault("宿主分组分页重复"));
+            }
+            result.push(group);
+        }
+        if items.len() < 200
+            || data["page"]["totalPages"]
+                .as_u64()
+                .is_some_and(|total| page >= total)
+        {
+            return Ok(result);
+        }
+    }
+    Err(fault("分组数量超过200000"))
+}
+pub async fn account_groups(
+    host: &HostClient,
+    account_id: &str,
+) -> Result<Vec<String>, PluginFault> {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("accountId", account_id)
+        .finish();
+    let data = admin(
+        host,
+        "GET",
+        &format!("/api/admin/accounts/detail?{query}"),
+        None,
+    )
+    .await?;
+    if data["account"]["id"].as_str() != Some(account_id) {
+        return Err(fault("宿主返回了不同账户，移组已终止"));
+    }
+    data["account"]["groups"]
+        .as_array()
+        .ok_or_else(|| fault("账户分组信息缺失"))?
+        .iter()
+        .map(|g| {
+            g["id"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| fault("账户分组ID无效"))
+        })
+        .collect()
+}
 pub async fn keys(host: &HostClient) -> Result<Vec<ClientKey>, PluginFault> {
     let mut cursor = None;
     let mut keys = vec![];

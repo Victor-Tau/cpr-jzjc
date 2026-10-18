@@ -1,50 +1,45 @@
-# v1.3.0 验证记录
+# v1.4.0 验证记录
 
 适配 Codex Proxy RS `>=3.29.1,<3.30.0`，Linux x86_64，glibc 2.36+。
 
-交付文件：`dist/personal.modeltrace-health-1.3.0-x86_64-unknown-linux-gnu.tar.gz`，30,654,531 字节。
+交付文件：`dist/personal.modeltrace-health-1.4.0-x86_64-unknown-linux-gnu.tar.gz`，30,672,255 字节。
 
-SHA-256：`62dd4c49df6544240c9608d595da1798877bcba8e64fe7906353d4001850ee85`。
+SHA-256：`f3e4db7a9139ce6b2af661f549bf36b7301407e602c238b0b20fbb52ddc7f7f8`。
 
 | 验证 | 结果 |
 | --- | --- |
-| Rust 单元测试 | 10 项通过，覆盖账户绑定与代理路由请求约束、判定、时区、SSE、指纹库与运行时解包 |
-| Python 单元测试 | 6 项通过，覆盖校准、无效回答、上游评分一致性、挑战生成，以及缓存文件变更后的重新加载 |
-| 发布包 RPC 集成 | 从最终安装包解出的二进制通过全部21项；包括请求期间读取进度与报告、取消模型流、进度版本与接收字节数、等待复测不阻塞其他账户，以及超过宿主预算后的干净超时与继续重试 |
-| 原有 RPC 回归 | 账户绑定、幂等、复测与请求预算、认证错误、身份变化、重启、定时范围、停用重试、指纹库更新回退、存储失败后不重放不确定请求 |
-| 浏览器交互 | 活跃任务阶段在2.5秒内自动更新；打开的报告自动更新到完成及最新轮次；隐藏暂停和恢复立即刷新；桌面/手机布局、配置保存、筛选、批量提交、更新回退及深色主题回归通过，无页面 JavaScript 异常 |
-| 静态与构建 | Rust fmt、Clippy `-D warnings`、前端 TypeScript 检查和生产构建通过；正式二进制使用 Zig 以 glibc 2.36 为目标构建，导入的最高 GLIBC 符号版本为2.34 |
-| 安装包校验 | 包与全部资源 SHA-256、相对资源路径、内置 Python/NumPy 离线评分通过；实际发布二进制完成解包与一次维护回调内的一轮评分；内置18个候选模型 |
+| Rust 单元测试 | 11 项通过，包括新默认阈值边界、旧任务兼容、连续确认、时区、账户绑定、SSE、运行时解包及指纹库 |
+| Python 单元测试 | 6 项通过，评分算法与运行时沿用1.3 |
+| 发布二进制 RPC 集成 | 30 项通过，覆盖关闭调度与移组的四种开关组合、单项失败不阻止另一项、分别重试、空分组及分页、目标删除、身份变化、移组校验、任务配置快照、中断后不重复写入和配置导入预览不保存 |
+| 真实版本升级 | 使用1.3和1.4安装包中的实际二进制，沿用同一模拟状态存储；自定义参数、配置版本、定时范围与时区、下次执行时间、指纹库及历史报告保留，新移组选项默认关闭，不重放模型请求 |
+| 浏览器交互 | 新默认参数、独立操作开关、目标分组、JSON 下载/复制备份、导入预览、单独移组重试、桌面/手机及深色主题通过；另外使用 `sandbox="allow-scripts"` iframe 验证实际宿主隔离环境下 JSON 备份与导入，无页面 JavaScript 异常 |
+| 实时刷新回归 | 活跃检测和待办调度操作每秒轮询；进度在2.5秒内更新；打开报告自动刷新，移组完成后刷新账户分组，隐藏暂停及恢复立即刷新 |
+| 静态与构建 | Rust fmt、Clippy `-D warnings`、前端 TypeScript 检查和生产构建通过；Zig以glibc2.36为目标构建，最高导入GLIBC符号版本2.34 |
+| 安装包校验 | 包摘要和全部资源摘要、相对资源路径、内置Python/NumPy离线校验及实际发布二进制冷启动解包/单次维护回调评分通过，内置18个候选模型 |
 
-## 性能依据
+## 配置与副作用
 
-1.2 的一轮检测需要4次维护回调，准备挑战、模型请求和评分之间各等待下一次调度。1.3 在剩余预算充足时只需1次回调。按 RS 3.29.1 的30秒间隔计算，减少步骤之间约90秒等待；首次等待调度、模型响应时间、重试及复测间隔仍然存在。
+保持插件 ID、状态 namespace、schemaVersion和schema不变。宿主更新原实例时复用状态代际，1.3缺少的新字段由反序列化默认值补齐，已保存规则与历史任务的配置快照不被新默认值覆盖。新建实例与原实例隔离，重装或迁移使用JSON备份导入。
 
-评分进程由每次操作启动改为常驻复用，缓存 NumPy 导入和指纹库解析结果。运行时仍约91MB，仅每个插件进程首次使用时解包。解包由阻塞工作线程执行，进度和报告读取走独立快照，长模型请求也不会占用这些接口的管理锁。
+导出已保存参数，导入文件先检查格式和大小，再由后端校验并补齐默认值，载入表单后需另行保存。宿主iframe禁止直接下载，提供可选中复制的完整JSON和复制按钮；可保存为 `modeltrace-health-config.json` 再导入。文件不含密钥值、账号凭据、历史或指纹库；跨平台迁移需重新核对Key、分组与账户ID。
 
-对比脚本 `scripts/benchmark.py` 直接运行1.2与1.3的发布二进制，使用即时返回的模拟模型，输出冷启动、后续任务的本地耗时及回调数。`schedulingGapSeconds` 为30秒间隔计算值，测试本身不等待这些间隔，也不测真实网络与模型延迟。可用以下命令复现：
+确认降智后各操作独立持久化并执行。关闭调度仅发送 `enabled=false`，移组仅发送 `groupIds=[target]`，替换原有全部分组。每次核对冻结的账户身份，操作后校验目标状态；已到目标时跳过写入。失败不重新发探针；操作期间中断转为可手动重试的失败状态，避免不确定请求自动重放。待办操作不被历史清理或删除。
 
-| 本机单次对比 | 1.2 | 1.3 |
-| --- | --- | --- |
-| 首次任务本地处理（含解包） | 2.25秒 | 2.89秒 |
-| 同进程后续任务本地处理 | 3.93秒 | 0.05秒 |
-| 单轮维护回调数 | 4 | 1 |
-| 步骤间调度等待（计算值） | 90秒 | 0秒 |
+每个维护回调执行一项待办操作，实际应用仍受宿主维护间隔影响。模型请求较慢时可能只完成样本获取，把评分留到下一次回调；测试确认已保存样本且不会重发该探针。默认超时120秒与宿主预算限制继续沿用1.3。
 
-冷启动仍有秒级解包和导入成本，单次计时受机器负载与文件系统影响；这些数据不代表真实模型检测端到端耗时。原始结果见 [benchmark-v1.3.0.json](benchmark-v1.3.0.json)。
+## 复现
 
 ```bash
-.venv/bin/python scripts/benchmark.py /path/v1.2/bin/modeltrace-health /path/v1.3/bin/modeltrace-health
+cargo test --manifest-path backend/Cargo.toml --locked
+cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings
+.venv/bin/python -m unittest discover -s engine/tests -v
+.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.4.0-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/protocol_smoke.py --binary /path/to/extracted/bin/modeltrace-health -v
+.venv/bin/python scripts/upgrade_smoke.py dist/personal.modeltrace-health-1.3.0-x86_64-unknown-linux-gnu.tar.gz dist/personal.modeltrace-health-1.4.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
-## 运行限制与测试范围
+浏览器复现依赖与命令见 [README](../README.md#开发与验证)，脚本为 `scripts/ui_fixture.py`、`scripts/ui_smoke.mjs`。截图：[账户列表](screenshots/accounts.png)、[设置](screenshots/settings.png)、[报告](screenshots/report.png)、[手机深色主题](screenshots/mobile.png)。
 
-请求期限取配置超时与宿主剩余预算中的较短值；维护调用预留1.5秒，请求前另留6秒用于流关闭、样本校验及保存。预算不足时评分延至下一次回调。RS 3.29.1 仍只有30秒维护预算，长模型请求需要宿主支持更长调用。真正的进程重启、存储失败或其他导致请求结果不确定的情况仍保留中断保护。
+集成使用真实发布二进制与模拟宿主、账户、Key、模型流和GitHub响应；未连接真实RS管理服务或发送真实账户检测。宿主管理接口和实例升级状态复用机制已核对固定SDK对应的RS3.29.1及3.29.3源码。
 
-代理由宿主按 `account_id` 解析；所有采样、失败重试和复测保持账户绑定。升级继续使用原有状态 schema，保留配置及历史。
-
-Python/NumPy 依赖未变，使用 `scripts/refresh_runtime.py` 验证1.2安装包的包摘要及全部资源摘要，复用其中固定的运行时，刷新评分与上游源码。本版运行时 SHA-256 为 `a8e41e162360f8cbe7d352adbdd702ad93ce50a381fd00a90e6d4ca6cc52d980`。
-
-浏览器使用模拟宿主数据；RPC 集成使用真实发布二进制和模拟账户、Key、模型事件、状态存储及 GitHub 下载。未连接真实 RS 管理服务或发送真实账户检测请求。
-
-浏览器截图：[账户列表](screenshots/accounts.png)、[参数与指纹库设置](screenshots/settings.png)、[检测报告](screenshots/report.png)、[手机深色主题](screenshots/mobile.png)。复现命令见 [README](../README.md#开发与验证) 和 `scripts/`。
+性能实现、时区和运行时沿用1.3，性能对比见 [1.3验证记录](verification-v1.3.0.md)。本版未宣称额外的端到端检测提速。运行时SHA-256仍为 `a8e41e162360f8cbe7d352adbdd702ad93ce50a381fd00a90e6d4ca6cc52d980`。

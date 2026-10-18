@@ -12,10 +12,11 @@ import { ZDialog } from '@codex-proxy/ui/dialog'
 import Settings from './components/Settings.vue'
 import { api, active, date, percent, status, verdict } from './api'
 import { createRequestId } from './request-id'
-import type { Account, Banks, Config, Job, Report } from './types'
+import type { Account, Banks, Config, Group, Job, Report } from './types'
 
 const tab = ref('accounts'), loading = ref(true), busy = ref(false), error = ref(''), notice = ref('')
 const accounts = ref<Account[]>([]), jobs = ref<Job[]>([]), config = ref<Config>(), banks = ref<Banks>()
+const allGroups = ref<Group[]>([])
 const keys = ref<{ id:string; name:string }[]>([]), revision = ref(0), settingsKey = ref(0), nextDue = ref<number|null>(null), scheduleError = ref<string|null>(null)
 const search = ref(''), plan = ref(''), state = ref(''), group = ref(''), resultFilter = ref(''), page = ref(1), pageSize = ref(20), selected = ref<string[]>([])
 const historySearch = ref(''), historyVerdict = ref(''), historyPage = ref(1), historySize = ref(20)
@@ -73,13 +74,13 @@ async function refreshProgress() {
   if (disposed) return
   progressRevision=r.revision; nextDue.value=r.nextDue; scheduleError.value=r.scheduleError
   if (!r.changed || !r.jobs) return
-  const previousDisable=new Map(jobs.value.map(j=>[j.id,j.disableState]))
+  const previousActions=new Map(jobs.value.map(j=>[j.id,`${j.disableState}:${j.groupState}`]))
   jobs.value=r.jobs
-  if (r.jobs.some(j=>j.disableState==='disabled' && previousDisable.get(j.id)!=='disabled')) await loadAccounts()
+  if (r.jobs.some(j=>(j.disableState==='disabled' || j.groupState==='moved') && previousActions.get(j.id)!==`${j.disableState}:${j.groupState}`)) await loadAccounts()
   const current=report.value
   if (reportOpen.value && current) {
     const job=r.jobs.find(j=>j.id===current.id)
-    if (job && (job.roundCount!==current.rounds.length || job.status!==current.status || job.disableState!==current.disableState)) {
+    if (job && (job.roundCount!==current.rounds.length || job.status!==current.status || job.disableState!==current.disableState || job.groupState!==current.groupState)) {
       const updated=await api.report(current.id)
       if (reportOpen.value && report.value?.id===current.id) {
         const followingLatest=roundIndex.value>=current.rounds.length-1
@@ -94,7 +95,7 @@ async function refreshProgress() {
 function schedulePoll(delay?: number) {
   if (timer) clearTimeout(timer)
   if (disposed || document.hidden) return
-  timer=setTimeout(poll,delay ?? (failures ? Math.min(30000,1000*2**failures) : activeJobs.value ? 1000 : 10000))
+  timer=setTimeout(poll,delay ?? (failures ? Math.min(30000,1000*2**failures) : (activeJobs.value || jobs.value.some(j=>[j.disableState,j.groupState].some(s=>['pending','attempting'].includes(s)))) ? 1000 : 10000))
 }
 async function poll() {
   if (disposed || document.hidden || polling) return
@@ -106,7 +107,7 @@ function visibilityChanged() { if (document.hidden) {if(timer) clearTimeout(time
 
 async function loadAccounts() { accounts.value=(await api.accounts()).accounts }
 async function action(fn: () => Promise<void>) { if(busy.value) return; busy.value=true; error.value=''; notice.value=''; try { await fn() } catch(e) { error.value=(e as Error).message } finally { busy.value=false; schedulePoll(0) } }
-async function load() { loading.value=true; try { const [b,a]=await Promise.all([api.bootstrap(),api.accounts()]); config.value=b.config; if(!b.configRevision) config.value.schedule.timezone=Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; revision.value=b.configRevision; banks.value=b.banks; keys.value=b.keys; jobs.value=b.jobs; accounts.value=a.accounts; nextDue.value=b.nextDue; scheduleError.value=b.scheduleError; settingsKey.value++ } catch(e) { error.value=(e as Error).message } finally { loading.value=false } }
+async function load() { loading.value=true; try { const [b,a]=await Promise.all([api.bootstrap(),api.accounts()]); config.value=b.config; if(!b.configRevision) config.value.schedule.timezone=Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; revision.value=b.configRevision; banks.value=b.banks; keys.value=b.keys; allGroups.value=b.groups; jobs.value=b.jobs; accounts.value=a.accounts; nextDue.value=b.nextDue; scheduleError.value=b.scheduleError; settingsKey.value++ } catch(e) { error.value=(e as Error).message } finally { loading.value=false } }
 function openSubmit(ids:string[]) { confirmIds.value=ids; confirmOpen.value=true }
 async function submit() { await action(async () => { const signature=[...confirmIds.value].sort().join(','); let id=requestIds.get(signature); if(!id) { id=createRequestId();requestIds.set(signature,id) } await api.submit(confirmIds.value,id); requestIds.delete(signature); confirmOpen.value=false; selected.value=selected.value.filter(id => !confirmIds.value.includes(id)); await refreshJobs(); notice.value='检测已加入后台队列，离开页面后仍会继续。' }) }
 async function save(c:Config) { await action(async () => { const r=await api.save(c,revision.value); config.value=r.config; revision.value=r.revision; settingsKey.value++; await refreshJobs(); notice.value='参数已保存。' }) }
@@ -115,6 +116,7 @@ async function openReport(id:string) { await action(async () => { report.value=a
 async function cancel(id?:string) { await action(async () => { await api.cancel(id); await refreshJobs() }) }
 async function remove(id:string) { await action(async () => { await api.delete(id); await refreshJobs() }) }
 async function retryDisable(id:string) { await action(async () => { await api.retryDisable(id); await refreshJobs(); await loadAccounts(); if(report.value?.id===id) report.value=await api.report(id) }) }
+async function retryGroup(id:string) { await action(async () => { await api.retryGroup(id); await refreshJobs(); await loadAccounts(); if(report.value?.id===id) report.value=await api.report(id) }) }
 onMounted(async () => { document.addEventListener('visibilitychange',visibilityChanged); clockTimer=setInterval(()=>{clock.value=Date.now()},1000); await load(); schedulePoll(0) })
 onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer) clearInterval(clockTimer); document.removeEventListener('visibilitychange',visibilityChanged) })
 </script>
@@ -140,7 +142,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
         <template #actions="{row}"><div class="inline"><ZButton size="small" :disabled="!canDetect(row) || busy" @click="openSubmit([row.id])">检测</ZButton><ZButton v-if="jobOf(row)" size="small" variant="text" :disabled="busy" @click="openReport(jobOf(row)!.id)">报告</ZButton></div></template>
       </ZTable><ZPagination v-model:current-page="page" v-model:page-size="pageSize" :total="filtered.length" :page-sizes="[10,20,50,100]" />
     </template>
-    <Settings v-if="tab==='settings' && config && banks" :key="settingsKey" :config="config" :revision="revision" :banks="banks" :keys="keys" :accounts="accounts" :selected="selected" :next-due="nextDue" :schedule-error="scheduleError" :busy="busy" @save="save" @bank="bank" @error="error=$event" />
+    <Settings v-if="tab==='settings' && config && banks" :key="settingsKey" :config="config" :revision="revision" :banks="banks" :keys="keys" :accounts="accounts" :groups="allGroups" :selected="selected" :next-due="nextDue" :schedule-error="scheduleError" :busy="busy" @save="save" @bank="bank" @error="error=$event" />
     <template v-if="tab==='history'">
       <div class="section-heading"><div><h2>检测历史</h2><p>保留各轮概率、参数及指纹库版本。</p></div><ZButton :disabled="busy" @click="action(refreshJobs)">刷新</ZButton></div>
       <div class="toolbar"><ZInput v-model="historySearch" class="search" placeholder="搜索账户" clearable aria-label="搜索历史账户" /><ZSelect v-model="historyVerdict" class="filter" :options="[{value:'',label:'全部结论'},...['degraded','no_match','inconclusive','running','queued','failed','interrupted','cancelled'].map(v=>({value:v,label:verdict(v)}))]" aria-label="历史结论筛选" /></div>
@@ -148,9 +150,9 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
         <template #account="{row}"><b>{{ row.accountName }}</b></template><template #source="{row}">{{ row.source==='schedule'?'定时':'手动' }}</template><template #result="{row}"><span :class="{danger:row.verdict==='degraded'}">{{ verdict(row.status==='completed'?row.verdict:row.status) }}</span></template><template #model="{row}">{{ row.prediction || '—' }}</template><template #probability="{row}">{{ percent(row.probability) }}</template><template #createdAt="{row}">{{ date(row.createdAt) }}</template><template #actions="{row}"><div class="inline"><ZButton size="small" variant="text" :disabled="busy" @click="openReport(row.id)">报告</ZButton><ZButton v-if="active(row)" size="small" variant="text" :disabled="busy" @click="cancel(row.id)">取消</ZButton><ZButton v-else size="small" variant="text" :disabled="busy" @click="remove(row.id)">删除</ZButton></div></template>
       </ZTable><ZPagination v-model:current-page="historyPage" v-model:page-size="historySize" :total="history.length" :page-sizes="[10,20,50,100]" />
     </template>
-    <ZDialog v-model="confirmOpen" title="开始账户检测" width="32rem" :close-on-click-modal="!busy"><p>将 {{ confirmIds.length }} 个账户加入检测队列，请求模型为 <b>{{ config?.requestModel }}</b>，使用所选计量 Key。</p><p>每轮只检测一次，失败时最多尝试五次；确认与低置信度复测会追加轮次。</p><p v-if="config?.autoDisable" class="danger">已开启：连续确认降智后自动关闭该账户调度。</p><p v-if="error" class="danger">{{ error }}</p><template #footer><ZButton :disabled="busy" @click="confirmOpen=false">取消</ZButton><ZButton type="primary" :loading="busy" @click="submit">加入检测队列</ZButton></template></ZDialog>
+    <ZDialog v-model="confirmOpen" title="开始账户检测" width="32rem" :close-on-click-modal="!busy"><p>将 {{ confirmIds.length }} 个账户加入检测队列，请求模型为 <b>{{ config?.requestModel }}</b>，使用所选计量 Key。</p><p>每轮只检测一次，失败时最多尝试五次；确认与低置信度复测会追加轮次。</p><p v-if="config?.autoDisable" class="danger">已开启：确认降智后自动关闭该账户调度。</p><p v-if="config?.autoMoveGroup" class="danger">已开启：确认降智后移入 {{ allGroups.find(g=>g.id===config?.targetGroupId)?.name || config?.targetGroupId }}，替换原有分组。</p><p v-if="error" class="danger">{{ error }}</p><template #footer><ZButton :disabled="busy" @click="confirmOpen=false">取消</ZButton><ZButton type="primary" :loading="busy" @click="submit">加入检测队列</ZButton></template></ZDialog>
     <ZDialog v-model="reportOpen" title="检测报告" width="60rem">
-      <template v-if="report"><div class="section-heading"><div><h3>{{ report.accountName }}</h3><p :class="{danger:report.verdict==='degraded'}" role="status" aria-live="polite">{{ progressText(report) }}</p></div><ZButton :disabled="busy" @click="openReport(report.id)">刷新报告</ZButton></div><div class="report-meta"><span>请求模型 <b>{{ report.config.requestModel }}</b></span><span>指纹库 <code>{{ report.bankCommit?.slice(0,12) }}</code></span><span>采样尝试 {{ report.attempts.length }}</span></div><p v-if="report.disableState==='failed'" class="danger">关闭调度操作失败。<ZButton size="small" :disabled="busy" @click="retryDisable(report.id)">重试关闭调度</ZButton></p><ZSelect v-if="report.rounds.length" v-model="roundIndex" :options="report.rounds.map((r,i)=>({value:i,label:`第${r.number}轮 · ${verdict(r.verdict)} · ${date(r.finishedAt)}`}))" aria-label="报告轮次" />
+      <template v-if="report"><div class="section-heading"><div><h3>{{ report.accountName }}</h3><p :class="{danger:report.verdict==='degraded'}" role="status" aria-live="polite">{{ progressText(report) }}</p></div><ZButton :disabled="busy" @click="openReport(report.id)">刷新报告</ZButton></div><div class="report-meta"><span>请求模型 <b>{{ report.config.requestModel }}</b></span><span>指纹库 <code>{{ report.bankCommit?.slice(0,12) }}</code></span><span>采样尝试 {{ report.attempts.length }}</span></div><p v-if="report.disableState==='failed'" class="danger">关闭调度操作失败：{{ report.disableError || '请检查宿主状态' }}。<ZButton size="small" :disabled="busy" @click="retryDisable(report.id)">重试关闭调度</ZButton></p><p v-if="report.groupState==='failed'" class="danger">移组操作失败：{{ report.groupError || '请检查宿主状态' }}。<ZButton size="small" :disabled="busy" @click="retryGroup(report.id)">重试移入分组</ZButton></p><ZSelect v-if="report.rounds.length" v-model="roundIndex" :options="report.rounds.map((r,i)=>({value:i,label:`第${r.number}轮 · ${verdict(r.verdict)} · ${date(r.finishedAt)}`}))" aria-label="报告轮次" />
       <template v-if="currentRound"><div class="family-summary"><ZTag v-for="f in currentRound.score.families" :key="f.family">{{ f.display_name }} {{ percent(f.probability) }}</ZTag></div><div class="probabilities"><div v-for="r in currentRound.score.results" :key="r.model" class="probability-row"><span>{{ r.label }}</span><div class="bar"><i :style="{width:`${r.probability*100}%`}" /></div><b>{{ percent(r.probability) }}</b></div></div></template><p v-else class="muted">尚无完整轮次结果。</p>
       <details><summary>配置快照与版本</summary><pre>{{ JSON.stringify({config:report.config,bankHash:report.bankHash,bankCommit:report.bankCommit,engineCommit:report.engineCommit},null,2) }}</pre></details><details><summary>请求记录（{{ report.attempts.length }}）</summary><ul class="attempts"><li v-for="(a,i) in report.attempts" :key="i"><time>{{ date(a.at) }}</time><code>{{ a.requestId || '未取得请求ID' }}</code><span>{{ a.error || '有效样本' }}</span></li></ul></details></template>
     </ZDialog>
