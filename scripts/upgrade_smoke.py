@@ -67,6 +67,8 @@ def main():
         try:
             after = current.request("api/bootstrap")
             restored = current.request("api/report?id=" + identity)
+            replay = current.request("api/submit", {"accountIds": ["acct-test"], "requestId": "actual-upgrade"})
+            assert replay["submitted"] == [identity], "upgrade must retain submission idempotency"
             for key, value in before["config"].items():
                 equivalent(value, after["config"][key])
             for key in ["configRevision", "nextDue"]:

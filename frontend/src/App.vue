@@ -31,20 +31,23 @@ const statuses = computed(() => [{value:'',label:'全部账户状态'},{value:'d
 const accountStatusClass = (a: Account) => !a.enabled ? 'muted' : ({ normal:'success', error:'danger', quota_exhausted:'warning', rate_limited:'warning' } as Record<string,string>)[a.status] || 'info'
 const latest = computed(() => { const result = new Map<string, Job>(); for (const job of jobs.value) if (!result.has(job.accountId)) result.set(job.accountId, job); return result })
 const jobOf = (a: Account) => latest.value.get(a.id)
-const canDetect = (a: Account) => a.enabled && a.supported && !active(jobOf(a))
+const manualActive = (a: Account) => jobs.value.some(j => j.accountId === a.id && j.source === 'manual' && active(j))
+const canDetect = (a: Account) => a.enabled && a.supported && !manualActive(a)
 const filtered = computed(() => accounts.value.filter(a => {
   const j = jobOf(a)
   return (!plan.value || (a.planType || 'unknown') === plan.value)
     && (!state.value || (state.value === 'disabled' ? !a.enabled : a.enabled && a.status === state.value))
     && (!group.value || (group.value === '__ungrouped__' ? !a.groups.length : a.groups.some(g => g.id === group.value)))
     && (!search.value.trim() || `${a.name} ${a.email || ''} ${a.id}`.toLowerCase().includes(search.value.trim().toLowerCase()))
-    && (!resultFilter.value || (resultFilter.value === 'active' ? active(j) : j?.verdict === resultFilter.value))
+    && (!resultFilter.value || (resultFilter.value === 'active' ? jobs.value.some(j => j.accountId === a.id && active(j)) : j?.verdict === resultFilter.value))
 }))
 const visible = computed(() => filtered.value.slice((page.value-1)*pageSize.value,page.value*pageSize.value))
 const pageCandidates = computed(() => visible.value.filter(canDetect))
 const chosen = computed(() => accounts.value.filter(a => selected.value.includes(a.id) && canDetect(a)))
 const allPage = computed(() => pageCandidates.value.length > 0 && pageCandidates.value.every(a => selected.value.includes(a.id)))
 const activeJobs = computed(() => jobs.value.filter(j => active(j)).length)
+const manualJobs = computed(() => jobs.value.filter(j => j.source === 'manual' && active(j)).length)
+const scheduledJobs = computed(() => jobs.value.filter(j => j.source === 'schedule' && active(j)).length)
 const autoPeriod = computed(() => {
   const s = config.value?.schedule
   if (!s?.enabled) return '已关闭'
@@ -67,15 +70,8 @@ function shortWhen(value: number) {
   if (at.toDateString() === tomorrow.toDateString()) return `明天 ${time}`
   return `${at.getMonth() + 1}月${at.getDate()}日 ${time}`
 }
-const nextRun = computed(() => {
-  if (!config.value) return null
-  const now = clock.value
-  const candidates = jobs.value.filter(j => active(j)).map(j => ({ at: Math.max(j.nextAt ?? 0, now), source: j.source === 'schedule' ? 'schedule' : 'manual' }))
-  if (config.value.schedule.enabled && nextDue.value != null) candidates.push({ at: Math.max(nextDue.value, now), source: 'schedule' })
-  candidates.sort((a, b) => a.at - b.at)
-  return candidates[0] ?? null
-})
-const runWhen = computed(() => !nextRun.value ? '—' : nextRun.value.at <= clock.value + 2000 ? '现在' : shortWhen(nextRun.value.at))
+const nextRun = computed(() => config.value?.schedule.enabled ? nextDue.value : null)
+const runWhen = computed(() => nextRun.value == null ? '—' : nextRun.value <= clock.value + 2000 ? '现在' : shortWhen(nextRun.value))
 const degradedCount = computed(() => Array.from(latest.value.values()).filter(j => j.verdict === 'degraded').length)
 const history = computed(() => jobs.value.filter(j => (!historySearch.value || `${j.accountName} ${j.accountId}`.toLowerCase().includes(historySearch.value.toLowerCase())) && (!historyVerdict.value || j.verdict === historyVerdict.value || j.status === historyVerdict.value)))
 const visibleHistory = computed(() => history.value.slice((historyPage.value-1)*historySize.value,historyPage.value*historySize.value))
@@ -84,8 +80,8 @@ watch([search,plan,state,group,resultFilter,pageSize], () => { page.value=1 })
 watch([historySearch,historyVerdict,historySize], () => { historyPage.value=1 })
 watch(filtered, a => { page.value=Math.min(page.value,Math.max(1,Math.ceil(a.length/pageSize.value))) })
 
-const columns: TableColumn<Account>[] = [{key:'select',label:'',kind:'selection',width:48},{key:'identity',label:'账户',kind:'identity',minWidth:240},{key:'plan',label:'订阅',width:95},{key:'groups',label:'分组',minWidth:135},{key:'status',label:'账户状态',width:110},{key:'result',label:'检测结果',minWidth:240},{key:'time',label:'检测时间',width:175},{key:'actions',label:'操作',kind:'actions',width:150}]
-const historyColumns: TableColumn<Job>[] = [{key:'account',label:'账户',kind:'identity',minWidth:220},{key:'source',label:'来源',width:80},{key:'result',label:'结论',minWidth:150},{key:'model',label:'最高候选',minWidth:160},{key:'probability',label:'概率',width:85},{key:'createdAt',label:'检测时间',width:175},{key:'actions',label:'操作',kind:'actions',width:170}]
+const columns: TableColumn<Account>[] = [{key:'select',label:'',kind:'selection',width:48},{key:'identity',label:'账户',kind:'identity',minWidth:240},{key:'plan',label:'订阅',width:95},{key:'groups',label:'分组',minWidth:135},{key:'status',label:'账户状态',width:110},{key:'result',label:'检测结果',minWidth:240},{key:'time',label:'检测时间',minWidth:235},{key:'actions',label:'操作',kind:'actions',width:150}]
+const historyColumns: TableColumn<Job>[] = [{key:'account',label:'账户',kind:'identity',minWidth:220},{key:'result',label:'结论',minWidth:150},{key:'model',label:'最高候选',minWidth:160},{key:'probability',label:'概率',width:85},{key:'createdAt',label:'检测时间',minWidth:235},{key:'actions',label:'操作',kind:'actions',width:170}]
 
 function selectOne(id:string,checked:boolean) { selected.value=checked ? Array.from(new Set([...selected.value,id])) : selected.value.filter(x => x !== id) }
 function selectPage(checked:boolean) { const ids=pageCandidates.value.map(a => a.id); selected.value=checked ? Array.from(new Set([...selected.value,...ids])) : selected.value.filter(id => !ids.includes(id)) }
@@ -144,7 +140,7 @@ async function submit() { await action(async () => { const signature=[...confirm
 async function save(c:Config) { await action(async () => { const r=await api.save(c,revision.value); config.value=r.config; revision.value=r.revision; settingsKey.value++; await refreshJobs(); notice.value='参数已保存。' }) }
 async function bank(operation:'check'|'apply'|'rollback'|'builtin') { await action(async () => { banks.value=await api.bank(operation); notice.value=operation==='check' ? (banks.value.update.error ? '' : banks.value.update.available ? '发现可用更新。' : '当前指纹库已是最新内容。') : '指纹库版本已切换，新任务将使用此版本。' }) }
 async function openReport(id:string) { await action(async () => { report.value=await api.report(id); roundIndex.value=0; reportOpen.value=true }) }
-async function cancel(id?:string) { await action(async () => { await api.cancel(id); await refreshJobs() }) }
+async function cancel(id?:string, source?:'manual'|'schedule') { await action(async () => { await api.cancel(id,source); await refreshJobs() }) }
 async function remove(id:string) { await action(async () => { await api.delete(id); await refreshJobs() }) }
 async function retryDisable(id:string) { await action(async () => { await api.retryDisable(id); await refreshJobs(); await loadAccounts(); if(report.value?.id===id) report.value=await api.report(id) }) }
 async function retryGroup(id:string) { await action(async () => { await api.retryGroup(id); await refreshJobs(); await loadAccounts(); if(report.value?.id===id) report.value=await api.report(id) }) }
@@ -159,8 +155,8 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
     <div v-if="notice" class="message success" role="status"><span>{{ notice }}</span><button aria-label="关闭提示" @click="notice=''">×</button></div>
     <p v-if="loading">正在读取账户与插件配置…</p>
     <template v-if="tab==='accounts'">
-      <div class="counters"><button @click="resultFilter=''">全部账户 <b>{{ accounts.length }}</b></button><button @click="resultFilter='active'">检测队列 <b>{{ activeJobs }}</b></button><button class="danger" @click="resultFilter='degraded'">确认降智 <b>{{ degradedCount }}</b></button><span class="auto-pill" :class="config?.schedule.enabled ? 'on' : 'off'" role="status" :title="autoTitle">{{ config?.schedule.enabled ? `自动检测 · ${autoPeriod}` : '自动检测 · 已关闭' }}</span><span class="next-run" :title="nextRun ? `下一次可执行：${date(nextRun.at)}（${nextRun.source === 'schedule' ? '自动' : '手动'}）` : '当前没有待执行的检测'">下次检测 <b class="small">{{ runWhen }}</b><em v-if="nextRun" :class="nextRun.source === 'schedule' ? 'auto' : 'manual'">{{ nextRun.source === 'schedule' ? '（自动）' : '（手动）' }}</em></span></div>
-      <div class="toolbar"><ZInput v-model="search" class="search" placeholder="搜索名称、邮箱或账户ID" clearable aria-label="搜索账户"><template #prefix><Search :size="16" /></template></ZInput><ZSelect v-model="plan" class="filter" :options="plans" aria-label="订阅类型筛选" /><ZSelect v-model="state" class="filter" :options="statuses" aria-label="账户状态筛选" /><ZSelect v-model="group" class="filter" :options="groups" aria-label="账户分组筛选" /><div class="commands"><ZButton :disabled="busy" @click="action(loadAccounts)"><template #icon><RefreshCw :size="15" /></template>刷新账户</ZButton><ZButton v-if="activeJobs" :disabled="busy" @click="cancel()"><template #icon><Square :size="14" /></template>停止队列</ZButton><ZButton type="primary" :disabled="busy || !chosen.length" @click="openSubmit(chosen.map(a=>a.id))"><template #icon><Play :size="15" /></template>检测所选（{{ chosen.length }}）</ZButton></div></div>
+      <div class="counters"><button @click="resultFilter=''">全部账户 <b>{{ accounts.length }}</b></button><button @click="resultFilter='active'">检测队列 <b>{{ activeJobs }}</b></button><button class="danger" @click="resultFilter='degraded'">确认降智 <b>{{ degradedCount }}</b></button><span class="auto-pill" :class="config?.schedule.enabled ? 'on' : 'off'" role="status" :title="autoTitle">{{ config?.schedule.enabled ? `自动检测 · ${autoPeriod}` : '自动检测 · 已关闭' }}</span><span class="next-run" :title="nextRun != null ? `下次自动检测：${date(nextRun)}` : '当前没有待执行的自动检测'">下次检测 <b class="small">{{ runWhen }}</b></span></div>
+      <div class="toolbar"><ZInput v-model="search" class="search" placeholder="搜索名称、邮箱或账户ID" clearable aria-label="搜索账户"><template #prefix><Search :size="16" /></template></ZInput><ZSelect v-model="plan" class="filter" :options="plans" aria-label="订阅类型筛选" /><ZSelect v-model="state" class="filter" :options="statuses" aria-label="账户状态筛选" /><ZSelect v-model="group" class="filter" :options="groups" aria-label="账户分组筛选" /><div class="commands"><ZButton :disabled="busy" @click="action(loadAccounts)"><template #icon><RefreshCw :size="15" /></template>刷新账户</ZButton><ZButton v-if="manualJobs" :disabled="busy" @click="cancel(undefined,'manual')"><template #icon><Square :size="14" /></template>停止手动队列</ZButton><ZButton v-if="scheduledJobs" :disabled="busy" @click="cancel(undefined,'schedule')"><template #icon><Square :size="14" /></template>停止自动队列</ZButton><ZButton type="primary" :disabled="busy || !chosen.length" @click="openSubmit(chosen.map(a=>a.id))"><template #icon><Play :size="15" /></template>检测所选（{{ chosen.length }}）</ZButton></div></div>
       <div class="selection"><ZCheckbox :model-value="allPage" :disabled="!pageCandidates.length || busy" label="选择当前页" @change="selectPage" /><span>已选 {{ chosen.length }} 个 · 匹配 {{ filtered.length }} 个</span><ZButton v-if="selected.length" size="small" variant="text" @click="selected=[]">清空选择</ZButton><ZButton v-if="resultFilter" size="small" variant="text" @click="resultFilter=''">清除结果筛选</ZButton></div>
       <ZTable :columns="columns" :data="visible" :row-key="a=>a.id" :loading="loading" empty-text="没有匹配的账户">
         <template #select="{row}"><ZCheckbox :model-value="selected.includes(row.id)" :disabled="!canDetect(row) || busy" :aria-label="`选择 ${row.email || row.name}`" @change="checked=>selectOne(row.id,checked)" /></template>
@@ -169,7 +165,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
         <template #groups="{row}"><div class="tags"><ZTag v-for="g in row.groups" :key="g.id" size="small">{{ g.name }}</ZTag><span v-if="!row.groups.length" class="muted">未分组</span></div></template>
         <template #status="{row}"><span class="account-status" :class="accountStatusClass(row)">{{ status(row) }}</span></template>
         <template #result="{row}"><div v-if="!row.supported" class="muted">暂不支持此提供方</div><div v-else-if="jobOf(row)" class="result"><b :class="{danger:jobOf(row)?.verdict==='degraded',success:jobOf(row)?.verdict==='no_match'}">{{ verdict(active(jobOf(row)) ? jobOf(row)!.status : jobOf(row)!.status !== 'completed' ? jobOf(row)!.status : jobOf(row)!.verdict) }}</b><small v-if="jobOf(row)?.prediction">{{ jobOf(row)?.prediction }} · {{ percent(jobOf(row)?.probability) }}</small><small class="live-progress" role="status">{{ progressText(jobOf(row)!) }}</small></div><span v-else class="muted">尚未检测</span></template>
-        <template #time="{row}"><span class="date">{{ date(jobOf(row)?.finishedAt || jobOf(row)?.createdAt) }}</span></template>
+        <template #time="{row}"><span class="date">{{ date(jobOf(row)?.finishedAt || jobOf(row)?.createdAt) }}<em v-if="jobOf(row)" class="detection-source" :class="jobOf(row)?.source === 'schedule' ? 'auto' : 'manual'">{{ jobOf(row)?.source === 'schedule' ? '（自动）' : '（手动）' }}</em></span></template>
         <template #actions="{row}"><div class="inline"><ZButton size="small" :disabled="!canDetect(row) || busy" @click="openSubmit([row.id])">检测</ZButton><ZButton v-if="jobOf(row)" size="small" variant="text" :disabled="busy" @click="openReport(jobOf(row)!.id)">报告</ZButton></div></template>
       </ZTable><ZPagination v-model:current-page="page" v-model:page-size="pageSize" :total="filtered.length" :page-sizes="[10,20,50,100]" />
     </template>
@@ -178,7 +174,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
       <div class="section-heading"><div><h2>检测历史</h2><p>保留各轮概率、参数及指纹库版本。</p></div><ZButton :disabled="busy" @click="action(refreshJobs)">刷新</ZButton></div>
       <div class="toolbar"><ZInput v-model="historySearch" class="search" placeholder="搜索账户" clearable aria-label="搜索历史账户" /><ZSelect v-model="historyVerdict" class="filter" :options="[{value:'',label:'全部结论'},...['degraded','no_match','inconclusive','running','queued','failed','interrupted','cancelled'].map(v=>({value:v,label:verdict(v)}))]" aria-label="历史结论筛选" /></div>
       <ZTable :columns="historyColumns" :data="visibleHistory" :row-key="j=>j.id" empty-text="还没有检测记录">
-        <template #account="{row}"><b>{{ row.accountName }}</b></template><template #source="{row}">{{ row.source==='schedule'?'定时':'手动' }}</template><template #result="{row}"><span :class="{danger:row.verdict==='degraded'}">{{ verdict(row.status==='completed'?row.verdict:row.status) }}</span></template><template #model="{row}">{{ row.prediction || '—' }}</template><template #probability="{row}">{{ percent(row.probability) }}</template><template #createdAt="{row}">{{ date(row.createdAt) }}</template><template #actions="{row}"><div class="inline"><ZButton size="small" variant="text" :disabled="busy" @click="openReport(row.id)">报告</ZButton><ZButton v-if="active(row)" size="small" variant="text" :disabled="busy" @click="cancel(row.id)">取消</ZButton><ZButton v-else size="small" variant="text" :disabled="busy" @click="remove(row.id)">删除</ZButton></div></template>
+        <template #account="{row}"><b>{{ row.accountName }}</b></template><template #result="{row}"><span :class="{danger:row.verdict==='degraded'}">{{ verdict(row.status==='completed'?row.verdict:row.status) }}</span></template><template #model="{row}">{{ row.prediction || '—' }}</template><template #probability="{row}">{{ percent(row.probability) }}</template><template #createdAt="{row}"><span class="date">{{ date(row.createdAt) }}<em class="detection-source" :class="row.source === 'schedule' ? 'auto' : 'manual'">{{ row.source === 'schedule' ? '（自动）' : '（手动）' }}</em></span></template><template #actions="{row}"><div class="inline"><ZButton size="small" variant="text" :disabled="busy" @click="openReport(row.id)">报告</ZButton><ZButton v-if="active(row)" size="small" variant="text" :disabled="busy" @click="cancel(row.id)">取消</ZButton><ZButton v-else size="small" variant="text" :disabled="busy" @click="remove(row.id)">删除</ZButton></div></template>
       </ZTable><ZPagination v-model:current-page="historyPage" v-model:page-size="historySize" :total="history.length" :page-sizes="[10,20,50,100]" />
     </template>
     <ZDialog v-model="confirmOpen" title="开始账户检测" width="32rem" :close-on-click-modal="!busy"><p>将 {{ confirmIds.length }} 个账户加入检测队列，请求模型为 <b>{{ config?.requestModel }}</b>，使用所选计量 Key。</p><p>每轮只检测一次，失败时最多尝试五次；确认与低置信度复测会追加轮次。</p><p v-if="config?.autoDisable" class="danger">已开启：确认降智后自动关闭该账户调度。</p><p v-if="config?.autoMoveGroup" class="danger">已开启：确认降智后移入 {{ allGroups.find(g=>g.id===config?.targetGroupId)?.name || config?.targetGroupId }}，替换原有分组。</p><p v-if="error" class="danger">{{ error }}</p><template #footer><ZButton :disabled="busy" @click="confirmOpen=false">取消</ZButton><ZButton type="primary" :loading="busy" @click="submit">加入检测队列</ZButton></template></ZDialog>

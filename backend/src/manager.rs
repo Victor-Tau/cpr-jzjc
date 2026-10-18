@@ -55,6 +55,7 @@ pub struct Manager {
     pub progress: Arc<Progress>,
     deadline: Option<tokio::time::Instant>,
     request_window: std::time::Duration,
+    last_job_source: Option<String>,
 }
 impl Manager {
     pub fn new(progress: Arc<Progress>) -> Self {
@@ -68,6 +69,7 @@ impl Manager {
             progress,
             deadline: None,
             request_window: std::time::Duration::ZERO,
+            last_job_source: None,
         }
     }
     pub async fn save(&mut self, host: &HostClient) -> Result<(), PluginFault> {
@@ -255,10 +257,24 @@ impl Manager {
         let rows = host::accounts(host).await?;
         let mut selected = vec![];
         for id in &ids {
-            let existing = format!(
+            let legacy = format!(
                 "j-{}",
                 &banks::hash(format!("{request}:{id}").as_bytes())[..32]
             );
+            // Preserve replay IDs from older releases while separating new
+            // requests by source, even if a manual request uses a schedule ID.
+            let existing = if self
+                .jobs
+                .iter()
+                .any(|(j, _)| j.id == legacy && j.source == source)
+            {
+                legacy
+            } else {
+                format!(
+                    "j-{}",
+                    &banks::hash(format!("{source}:{request}:{id}").as_bytes())[..32]
+                )
+            };
             if self.control.job_ids.contains(&existing) {
                 selected.push((existing, None));
                 continue;
@@ -273,12 +289,12 @@ impl Manager {
             if self
                 .jobs
                 .iter()
-                .any(|(j, _)| j.account_id == *id && j.active())
+                .any(|(j, _)| j.account_id == *id && j.source == source && j.active())
             {
                 if source == "schedule" {
                     continue;
                 }
-                return Err(fault(format!("账户已有检测任务：{}", a.name)));
+                return Err(fault(format!("账户已有手动检测任务：{}", a.name)));
             }
             selected.push((existing, Some(a.clone())));
         }
@@ -340,9 +356,17 @@ impl Manager {
         }
         Ok(submitted)
     }
-    pub async fn cancel(&mut self, host: &HostClient, id: Option<&str>) -> Result<(), PluginFault> {
+    pub async fn cancel(
+        &mut self,
+        host: &HostClient,
+        id: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<(), PluginFault> {
         for i in 0..self.jobs.len() {
-            if self.jobs[i].0.active() && id.is_none_or(|id| id == self.jobs[i].0.id) {
+            if self.jobs[i].0.active()
+                && id.is_none_or(|id| id == self.jobs[i].0.id)
+                && source.is_none_or(|source| source == self.jobs[i].0.source)
+            {
                 self.jobs[i]
                     .0
                     .finish("cancelled", "inconclusive", "管理员取消检测", now());
@@ -697,25 +721,24 @@ impl Manager {
             self.save(host).await?;
             let rows = host::accounts(host).await?;
             let s = &self.control.config.schedule;
-            let ids = rows
-                .iter()
-                .filter(|a| {
-                    a.enabled
-                        && a.supported
-                        && if s.scope == "ids" {
-                            s.account_ids.contains(&a.id)
-                        } else {
-                            a.matches(&s.filter)
-                        }
-                })
-                .filter(|a| {
-                    !self
-                        .jobs
-                        .iter()
-                        .any(|(j, _)| j.active() && j.account_id == a.id)
-                })
-                .map(|a| a.id.clone())
-                .collect::<Vec<_>>();
+            let ids =
+                rows.iter()
+                    .filter(|a| {
+                        a.enabled
+                            && a.supported
+                            && if s.scope == "ids" {
+                                s.account_ids.contains(&a.id)
+                            } else {
+                                a.matches(&s.filter)
+                            }
+                    })
+                    .filter(|a| {
+                        !self.jobs.iter().any(|(j, _)| {
+                            j.active() && j.source == "schedule" && j.account_id == a.id
+                        })
+                    })
+                    .map(|a| a.id.clone())
+                    .collect::<Vec<_>>();
             let result = if ids.is_empty() {
                 Ok(vec![])
             } else {
@@ -738,15 +761,21 @@ impl Manager {
         let next = self
             .jobs
             .iter()
-            .position(|(j, _)| j.status == "running" && j.next_at <= now())
-            .or_else(|| {
-                self.jobs
-                    .iter()
-                    .position(|(j, _)| j.status == "queued" && j.next_at <= now())
-            });
+            .enumerate()
+            .filter(|(_, (j, _))| j.active() && j.next_at <= now())
+            // Alternate ready sources so confirmation rounds from one source
+            // cannot monopolize execution while the other has queued work.
+            .min_by_key(|(_, (j, _))| {
+                (
+                    self.last_job_source.as_deref() == Some(j.source.as_str()),
+                    j.status != "running",
+                )
+            })
+            .map(|(i, _)| i);
         if let Some(i) = next
             && self.jobs[i].0.next_at <= now()
         {
+            self.last_job_source = Some(self.jobs[i].0.source.clone());
             if let Err(e) = self.advance(host, i).await {
                 if !self.loaded {
                     return Err(e);

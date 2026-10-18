@@ -1,34 +1,39 @@
-# v1.4.3 验证记录
+# v1.4.5 验证记录
 
 适配 Codex Proxy RS `>=3.29.1,<3.30.0`，Linux x86_64，glibc 2.36+。
 
-交付文件：`dist/personal.modeltrace-health-1.4.3-x86_64-unknown-linux-gnu.tar.gz`，30,676,707 字节。
+交付文件：`dist/personal.modeltrace-health-1.4.5-x86_64-unknown-linux-gnu.tar.gz`，30,677,936 字节。
 
-SHA-256：`ca4cd7838304b281914a1496ed384609395e735629e9874367c735e74ecba542`。
+SHA-256：`25ed3fca955a35190d658a6ad7ffe5ff232c2ce9bd6d629045714a427422778f`。
 
 ## 改进内容
 
-账户页顶部新增自动检测状态：是否开启与检测周期（绿色开启/灰色关闭），以及下一次检测时间及来源标注（定时为「（自动）」，手动任务为「（手动）」）。下一次时间取定时 `nextDue` 与活动任务 `nextAt` 中较早者：正在进行显示「现在」，当天只显示时刻、跨天附带日期，悬停可见完整时间与时区。
+手动与自动任务分别按「账户 + 来源」去重，同一账户可以同时保留两类活动任务。自动任务不会禁用手动检测按钮或批量选择，手动任务不会使自动计划跳过该账户。两类就绪任务在维护回调中交替执行，各任务独立保留采样、重试、复测与报告。执行仍受宿主维护调用预算约束。
 
-展示数据全部来自既有 `api/bootstrap` 与 `api/progress` 快照，未改动后端、调度、评分与持久化；1.4.2 的进度显示修复继续保留。
+新增「停止手动队列」和「停止自动队列」，按来源取消任务，进度缓存中的即时取消与持久任务取消使用相同来源条件，避免运行期间误停另一类任务。取消不改变自动计划；原 API 省略来源与任务 ID 时仍可停止全部任务。
+
+账户列表和检测历史在检测时间后显示「（手动）」或「（自动）」。顶部「下次检测」只显示自动计划的 `nextDue`，不再附加来源，也不混入手动任务的执行、重试或复测时间。关闭自动计划时显示「—」。
+
+插件 ID、状态 namespace 和 schema 保持不变。原实例升级保留配置、历史、指纹库与自动计划；旧任务 ID 仍支持原提交的幂等重试。
 
 ## 验证结果
 
 | 验证 | 结果 |
 | --- | --- |
-| Rust 单元测试 | 11项通过，覆盖阈值、连续确认、旧记录兼容、时区、账户绑定、完整SSE要求、运行时解包及指纹库 |
-| Python 单元测试 | 6项通过，评分算法与运行时未变更 |
-| 发布二进制 RPC 集成 | 34项全部通过（176.254秒），含延后评分阶段回归；调试二进制同一套件34项通过（145.024秒） |
-| 真实版本升级 | 1.3.0→1.4.3、1.4.0→1.4.3、1.4.1→1.4.3、1.4.2→1.4.3均通过。检查自定义参数、配置版本、定时时区与下次执行时间、报告及指纹库保留，升级不重放请求 |
-| 浏览器交互 | 20项检查通过，新增「自动检测状态与下次检测来源」：定时开启时显示周期并标注「（自动）」；关闭后显示「已关闭」与「下次检测 —」；手动任务运行时显示「现在（手动）」；无页面JavaScript异常 |
-| 静态与构建 | Rust fmt、Clippy `-D warnings`、TypeScript及前端生产构建通过；以单核 `-j1`、Zig glibc2.36 构建，最高导入GLIBC符号版本2.34 |
-| 安装包 | 包摘要与全部资源摘要、离线Python/NumPy评分及实际插件冷启动解包/完整评分通过，内置18个候选模型 |
+| Rust 单元测试 | 11 项通过 |
+| Python 单元测试 | 6 项通过 |
+| 调试二进制 RPC 集成 | 38 项通过，175.711 秒 |
+| 发布二进制 RPC 集成 | 38 项通过，185.804 秒 |
+| 真实版本升级 | 1.3.0→1.4.5、1.4.3→1.4.5 通过；配置、配置版本、下次自动执行时间、报告、指纹库保留，旧提交重试返回原任务，无探针重放 |
+| 浏览器交互 | 25 项通过，无页面 JavaScript 异常；覆盖时间后的来源标记、自动检测期间手动提交、分别停止队列、较新的自动结果不解锁仍有活动手动任务的账户，以及移动端、深色主题、实时进度和配置备份等既有交互 |
+| 静态与构建 | Rust fmt、Clippy `-D warnings`、TypeScript 和 Vite 生产构建通过；单核 Zig glibc 2.36 发布构建完成，最高导入 GLIBC 符号版本为 2.34 |
+| 安装包 | 包摘要、全部资源摘要、离线 Python/NumPy 评分、实际插件冷启动解包与完整检测流程通过，内置 18 个候选模型 |
 
-多数RPC测试先显式预热评分引擎，以验证各自的业务路径；冷启动由延后评分回归、准备延迟回归及完整安装包测试覆盖。模拟宿主会提供指定调用预算和延迟模型流，未连接真实RS管理服务或发送真实账户请求。
+新增 RPC 用例覆盖两个方向的交叉提交、相同请求字符串的来源隔离、同来源重复提交拒绝、两类任务交替执行、来源取消不影响另一队列或自动计划，以及探针执行期间取消另一来源。
 
-升级用例在比较前会等待旧版本任务结算：1.4起评分可能跨维护回调完成，而进程重启后首次载入会把未结算任务按设计标记为「中断，需重新检测」，不重放请求；该行为自1.4.1起一致，并非1.4.3引入。
+测试使用模拟宿主与模型流，没有向真实账户发送检测请求。浏览器运行实际前端构建，使用模拟宿主数据；Chromium 在沙箱外执行，解决当前环境对浏览器启动系统调用的限制。前端使用现有锁定依赖，Node 22.22.1 直接执行 vue-tsc 与 Vite 完成验证。
 
-插件ID、状态namespace和schema保持不变；1.4默认参数、移组/关闭调度、配置备份及1.3时区逻辑保留。本次改进不要求更新宿主。
+Python/NumPy 运行时未修改，SHA-256 为 `a8e41e162360f8cbe7d352adbdd702ad93ce50a381fd00a90e6d4ca6cc52d980`。
 
 ## 复现
 
@@ -36,13 +41,13 @@ SHA-256：`ca4cd7838304b281914a1496ed384609395e735629e9874367c735e74ecba542`。
 cargo test --manifest-path backend/Cargo.toml --locked
 cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
 .venv/bin/python -m unittest discover -s engine/tests -v
-.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.4.3-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.4.5-x86_64-unknown-linux-gnu.tar.gz
 .venv/bin/python scripts/protocol_smoke.py --binary /path/to/extracted/bin/modeltrace-health -v
-.venv/bin/python scripts/upgrade_smoke.py dist/personal.modeltrace-health-1.4.2-x86_64-unknown-linux-gnu.tar.gz dist/personal.modeltrace-health-1.4.3-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/upgrade_smoke.py dist/personal.modeltrace-health-1.4.3-x86_64-unknown-linux-gnu.tar.gz dist/personal.modeltrace-health-1.4.5-x86_64-unknown-linux-gnu.tar.gz
 .venv/bin/python scripts/ui_fixture.py
 PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin node scripts/ui_smoke.mjs
 ```
 
-浏览器环境准备及完整构建命令见 [README](../README.md#开发与验证)。浏览器截图：[账户列表](screenshots/accounts.png)、[参数与指纹库设置](screenshots/settings.png)、[检测报告](screenshots/report.png)、[手机深色主题](screenshots/mobile.png)。
+构建和浏览器环境准备见 [README](../README.md#开发与验证)。界面截图：[账户列表](screenshots/accounts.png)、[自动检测来源与独立手动队列](screenshots/detection-source.png)、[历史中的手动与自动时间标记](screenshots/history.png)、[参数配置](screenshots/settings.png)、[报告](screenshots/report.png)、[手机深色主题](screenshots/mobile.png)。
 
-1.4.2进度显示修复见 [1.4.2记录](verification-v1.4.2.md)，1.4功能验证见 [1.4.0记录](verification-v1.4.0.md)，1.4.1超时修复见 [1.4.1记录](verification-v1.4.1.md)，原性能与评分机制见 [1.3.0记录](verification-v1.3.0.md)。运行时SHA-256仍为 `a8e41e162360f8cbe7d352adbdd702ad93ce50a381fd00a90e6d4ca6cc52d980`，与1.4.1、1.4.2一致。
+历史验证：[1.4.3](verification-v1.4.3.md)、[1.4.2](verification-v1.4.2.md)、[1.4.1](verification-v1.4.1.md)、[1.4.0](verification-v1.4.0.md)、[1.3.0](verification-v1.3.0.md)。

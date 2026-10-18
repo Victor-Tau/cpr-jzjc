@@ -13,6 +13,16 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+fn cancel_source(body: &Value) -> Result<Option<&str>, PluginFault> {
+    match body.get("source").filter(|value| !value.is_null()) {
+        None => Ok(None),
+        Some(value) => match value.as_str() {
+            Some(source @ ("manual" | "schedule")) => Ok(Some(source)),
+            _ => Err(host::fault("检测来源必须为 manual 或 schedule")),
+        },
+    }
+}
+
 fn registration() -> ManagementRegistration {
     let routes = [
         ("GET", "api/bootstrap"),
@@ -97,7 +107,7 @@ async fn handle(
             )
         }
         ("GET", "api/models") => {
-            let models:gateway_plugin_sdk::call::host::ModelListResult=host::meta(h,"host.models.list",json!({"client_key_id":query("keyId"),"protocol":"openai","client_version":"modeltrace-health/1.4.3"})).await?;
+            let models:gateway_plugin_sdk::call::host::ModelListResult=host::meta(h,"host.models.list",json!({"client_key_id":query("keyId"),"protocol":"openai","client_version":"modeltrace-health/1.4.5"})).await?;
             Ok(json!({"models":models.models}))
         }
         ("GET", "api/progress") => m
@@ -155,7 +165,8 @@ async fn handle(
             Ok(json!({"submitted":m.submit(h,ids,id,"manual").await?}))
         }
         ("POST", "api/cancel") => {
-            m.cancel(h, body["id"].as_str()).await?;
+            m.cancel(h, body["id"].as_str(), cancel_source(&body)?)
+                .await?;
             Ok(json!({"ok":true}))
         }
         ("POST", "api/delete") => {
@@ -250,10 +261,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(value)
                 } else if call.request.method == "POST" && call.request.path == "api/cancel" {
                     match serde_json::from_slice::<Value>(&call.payload) {
-                        Ok(body) => match progress.cancel(body["id"].as_str()) {
-                            Ok(()) => {
+                        Ok(body) => match cancel_source(&body).and_then(|source| {
+                            progress.cancel(body["id"].as_str(), source)?;
+                            Ok(source)
+                        }) {
+                            Ok(source) => {
                                 if let Ok(mut m) = manager.try_lock() {
-                                    m.cancel(&call.host, body["id"].as_str())
+                                    m.cancel(&call.host, body["id"].as_str(), source)
                                         .await
                                         .map(|()| json!({"ok":true}))
                                 } else {

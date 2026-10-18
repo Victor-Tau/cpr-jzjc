@@ -8,16 +8,17 @@
 
 在宿主「插件管理 → 安装插件 → 上传包」上传：
 
-`dist/personal.modeltrace-health-1.4.3-x86_64-unknown-linux-gnu.tar.gz`
+`dist/personal.modeltrace-health-1.4.5-x86_64-unknown-linux-gnu.tar.gz`
 
 启用后打开「账号降智检测」，进入「参数配置」选择已有计量 Key，保存后即可单号或批量检测。检测请求由宿主按指定账户 ID 执行，使用该账户绑定的代理并计入所选 Key。Key 的账户分组和模型权限仍由宿主校验。页面仅接收 Key ID 和名称。
 
 运行时首次检测会解出约91MB文件，目标目录需可写、可执行并有足够空间。自动跳过 `noexec` 临时目录，解包失败时清理残留并尝试 `/var/tmp`，兼容 Docker 中仅64MB且禁止执行的 `/tmp`。可用宿主进程的 `MODELTRACE_RUNTIME_DIR` 指定首选目录，或用 `TMPDIR` 修改系统临时目录。解包不恢复不必要的文件时间戳；异常会显示具体条目和系统错误。
 
-### 1.4.3 顶部自动检测状态
+### 1.4.5 检测来源独立
 
-- 账户页顶部新增一行自动检测状态：是否开启、检测周期（绿色开启/灰色关闭），以及下一次检测时间及其来源：定时显示「（自动）」、手动任务显示「（手动）」。
-- 下一次时间取「定时下一次执行」与「活动任务下一次执行」中较早者；当天只显示时刻，跨天显示「明天 06:10」，正在执行显示「现在」，悬停可见完整时间与时区。数据全部来自现有接口，检测行为不变。
+- 同一账户的手动与自动检测分别排队、去重、重试并保留报告；自动任务不会禁用手动检测按钮，手动任务不会使定时检测跳过该账户。两类就绪任务交替执行，各自保留完整的检测与复测流程。
+- 「停止手动队列」与「停止自动队列」分别取消对应来源的任务，不改变另一队列或自动计划。取消单个任务仍可在检测历史中操作。
+- 账户列表和检测历史的检测时间后显示「（手动）」或「（自动）」。顶部保留自动检测开关状态和周期，「下次检测」仅显示自动计划时间，不再附加来源，也不受手动任务的开始、重试或取消影响。
 
 ### 1.4.2 进度显示修复
 
@@ -104,7 +105,7 @@
 
 支持固定间隔（分钟）和指定IANA时区的每日时刻。每日时刻遇到夏令时缺失分钟时，在之后首个有效分钟执行；重复时刻当日只运行一次。
 
-范围可保存订阅、状态、分组和关键词筛选条件，运行时重新匹配以纳入新账户；也可保存固定账户ID。定时只检测启用的OpenAI账户，跳过已排队账户。错过的时间点合并一次，不补跑全部历史时间点。每次最多提交500个账户，超出会在配置页显示错误，需缩小范围。
+范围可保存订阅、状态、分组和关键词筛选条件，运行时重新匹配以纳入新账户；也可保存固定账户ID。定时只检测启用的OpenAI账户，仅跳过已有活动自动任务的账户；活动手动任务不影响定时提交。手动检测不改变定时计划的下次执行时间。错过的时间点合并一次，不补跑全部历史时间点。每次最多提交500个账户，超出会在配置页显示错误，需缩小范围。
 
 ### 指纹库在线更新
 
@@ -134,7 +135,7 @@ cargo build --manifest-path backend/Cargo.toml --locked
 .venv/bin/python scripts/build_runtime.py
 cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu.2.36
 cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
-.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.4.3-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.4.5-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 基础镜像已缓存时可向 `build_runtime.py` 传 `--base-tar /path/python-base.tar`。脚本验证固定镜像配置、各镜像层和NumPy wheel哈希，不依赖Docker守护进程。`scripts/package.sh` 可串联构建和校验，需在已激活的开发环境运行。
@@ -180,7 +181,7 @@ PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin node scripts/ui_smoke.mjs
 | POST | `api/submit` | `{accountIds, requestId}` 幂等提交 |
 | GET | `api/jobs` / `api/report?id=...` | 任务列表与报告 |
 | GET | `api/progress?since=...` | 轻量进度快照；版本未变化时返回 `changed=false,jobs=null` |
-| POST | `api/cancel` / `api/delete` / `api/retry-disable` / `api/retry-group` | `{id}` 取消、删除历史、重试关闭调度或移组；取消省略id时停止全部队列 |
+| POST | `api/cancel` / `api/delete` / `api/retry-disable` / `api/retry-group` | `{id}` 取消、删除历史、重试关闭调度或移组；取消支持可选 `source=manual/schedule` 分别停止队列；省略id与source时停止全部队列 |
 | POST | `api/banks/check` / `apply` / `rollback` / `builtin` | 检查、应用、回退与恢复内置库 |
 
 许可证为MIT。第三方原始声明见 `legal/NOTICE.md`、`legal/THIRD_PARTY.txt` 与 `vendor/modeltrace/LICENSE`。

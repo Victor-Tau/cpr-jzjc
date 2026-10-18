@@ -452,6 +452,76 @@ class Integration(unittest.TestCase):
         self.host.close();state=self.host.state;state[('control','main')]['value']['nextDue']=1
         self.host=Host(state=state);self.addCleanup(self.host.close);self.host.tick(2)
         jobs=self.host.request('api/jobs')['jobs'];self.assertEqual(len(jobs),1);self.assertEqual(jobs[0]['source'],'schedule')
+    def arm_due_schedule(self, **overrides):
+        cfg=self.config(**overrides)
+        cfg['schedule'].update(enabled=True,scope='ids',accountIds=['acct-test'])
+        b=self.host.request('api/bootstrap')
+        self.host.request('api/config',{'config':cfg,'revision':b['configRevision']})
+        self.host.close();state=self.host.state
+        state[('control','main')]['value']['nextDue']=1
+        self.host=Host(state=state);self.addCleanup(self.host.close)
+        self.host.request('api/banks/builtin',{})
+
+    def test_manual_does_not_skip_schedule_or_change_next_due(self):
+        self.arm_due_schedule()
+        # Identical request strings from different sources must remain independent.
+        body={'accountIds':['acct-test'],'requestId':'schedule-1'}
+        manual=self.host.request('api/submit',body)['submitted'][0]
+        self.assertEqual(self.host.request('api/jobs')['nextDue'],1)
+        self.host.tick()
+        snapshot=self.host.request('api/jobs');jobs=snapshot['jobs']
+        self.assertEqual({j['source'] for j in jobs},{'manual','schedule'})
+        self.assertEqual(len({j['id'] for j in jobs}),2)
+        self.assertEqual(self.host.request('api/submit',body)['submitted'],[manual])
+        self.assertEqual(self.host.request('api/jobs')['nextDue'],snapshot['nextDue'])
+        self.assertGreater(snapshot['nextDue'],1)
+        self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'duplicate-manual'},ok=False)
+
+    def test_schedule_does_not_block_manual_and_sources_take_turns(self):
+        self.arm_due_schedule(lowConfidencePercent=100,degradedPercent=100,lowConfidenceRetries=3)
+        self.host.tick() # Queue automatic work first.
+        scheduled=self.host.request('api/jobs')['jobs'][0]['id']
+        manual=self.submit()
+        # Both ready sources get a round before either consumes its retest budget.
+        self.host.tick(2)
+        for identity in [scheduled,manual]:
+            report=self.host.request('api/report?id='+identity)
+            self.assertEqual(len(report['rounds']),1)
+            self.assertEqual(report['status'],'running')
+        self.assertEqual(len(self.host.executions),2)
+
+    def test_source_scoped_cancel_keeps_other_queue_and_schedule(self):
+        self.arm_due_schedule()
+        manual=self.submit();self.host.tick()
+        jobs=self.host.request('api/jobs');due=jobs['nextDue']
+        scheduled=next(j['id'] for j in jobs['jobs'] if j['source']=='schedule')
+        self.host.request('api/cancel',{'source':'invalid'},ok=False)
+        self.host.request('api/cancel',{'source':'manual'})
+        self.assertEqual(self.host.request('api/report?id='+manual)['status'],'cancelled')
+        self.assertEqual(self.host.request('api/report?id='+scheduled)['status'],'queued')
+        other=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'another-manual'})['submitted'][0]
+        self.host.request('api/cancel',{'source':'schedule'})
+        self.assertEqual(self.host.request('api/report?id='+scheduled)['status'],'cancelled')
+        self.assertEqual(self.host.request('api/report?id='+other)['status'],'queued')
+        self.assertEqual(self.host.request('api/jobs')['nextDue'],due)
+
+    def test_source_cancel_during_probe_does_not_cancel_other_source(self):
+        self.arm_due_schedule(lowConfidencePercent=0,degradedPercent=100)
+        self.host.tick();scheduled=self.host.request('api/jobs')['jobs'][0]['id']
+        manual=self.submit();original=self.host.callback;observed=[]
+        def callback(method,p,body):
+            if method=='host.model.stream_read' and not observed:
+                observed.append(True)
+                self.host.request('api/cancel',{'source':'manual'})
+                jobs=self.host.request('api/progress')['jobs']
+                auto=next(j for j in jobs if j['id']==scheduled)
+                self.assertNotEqual(auto.get('progress',{}).get('stage'),'cancelling')
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick(2)
+        self.assertTrue(observed)
+        self.assertEqual(self.host.request('api/report?id='+manual)['status'],'cancelled')
+        self.assertEqual(self.host.request('api/report?id='+scheduled)['status'],'completed')
+
     def test_partial_update_keeps_active_and_cleans_on_restart(self):
         self.config();old=self.host.request('api/bootstrap')['banks']['active']['hash'];b=json.loads(self.host.bank);b['built_at']='new-build';self.host.bank=raw(b)
         self.host.request('api/banks/check',{});self.host.fail_put=lambda key,value:key[0]=='banks'

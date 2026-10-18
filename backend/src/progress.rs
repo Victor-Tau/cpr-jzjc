@@ -122,7 +122,11 @@ impl Progress {
         Some(r)
     }
 
-    pub fn cancel(&self, id: Option<&str>) -> Result<(), gateway_plugin_sdk::PluginFault> {
+    pub fn cancel(
+        &self,
+        id: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<(), gateway_plugin_sdk::PluginFault> {
         let ids = {
             let s = self.state.read().unwrap();
             if !s.ready {
@@ -132,6 +136,7 @@ impl Progress {
                 .iter()
                 .filter(|j| {
                     id.is_none_or(|id| j["id"] == id)
+                        && source.is_none_or(|source| j["source"] == source)
                         && ["queued", "running"].contains(&j["status"].as_str().unwrap_or(""))
                 })
                 .filter_map(|j| j["id"].as_str().map(str::to_owned))

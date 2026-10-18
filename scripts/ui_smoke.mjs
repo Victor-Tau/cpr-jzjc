@@ -69,12 +69,12 @@ try {
   await page.getByText('检测已加入后台队列，离开页面后仍会继续。').waitFor()
   assert.equal(await page.evaluate(()=>window.__randomUuidFallback),true)
   await page.getByRole('textbox',{name:'搜索账户',exact:true}).fill('')
+  await page.screenshot({path:resolve(root,'.cache/accounts.png'),fullPage:true})
   // Exercise a real dropdown, not only the text search.
   await page.getByLabel('订阅类型筛选',{exact:true}).click()
   await page.getByRole('option',{name:'pro',exact:true}).click()
   await page.getByRole('listbox').waitFor({state:'hidden'})
   await page.getByText('匹配 11 个',{exact:false}).waitFor()
-  await page.screenshot({path:resolve(root,'.cache/accounts.png'),fullPage:true})
   await page.getByRole('button',{name:'参数配置',exact:true}).click()
   assert.equal(await page.getByRole('button',{name:'保存全部参数',exact:true}).count(),1)
   for(const [label,value] of [['低置信度复测阈值（%）','20'],['降智判定阈值（%）','90'],['连续确认轮数','1'],['低置信度额外复测次数','1'],['复测与失败重试间隔（秒）','10'],['历史保留（天）','30']]) {
@@ -146,7 +146,24 @@ try {
   const nextRunText = async () => (await page.locator('.next-run').innerText()).replace(/\s+/g,' ')
   await page.locator('.auto-pill').waitFor()
   assert.match(await page.locator('.auto-pill').innerText(),/自动检测 · 每 30 分钟/)
-  assert.match(await nextRunText(),/下次检测 .+（自动）/)
+  assert.match(await nextRunText(),/下次检测 .+/)
+  assert.doesNotMatch(await nextRunText(),/（自动）|（手动）/)
+  assert.match(await page.locator('.next-run').getAttribute('title'),/下次自动检测/)
+  // Starting manual work must leave the enabled automatic schedule unchanged.
+  const plannedNextRun=await nextRunText()
+  await page.evaluate(()=>{
+    const f=window.__fixture,j=f.bootstrap.jobs[0]
+    j.status='running';j.nextAt=Date.now()
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.getByRole('button',{name:'停止手动队列',exact:true}).waitFor({timeout:2500})
+  assert.equal(await nextRunText(),plannedNextRun)
+  await page.evaluate(()=>{
+    const f=window.__fixture
+    f.bootstrap.jobs[0].status='completed'
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.getByRole('button',{name:'停止手动队列',exact:true}).waitFor({state:'hidden',timeout:2500})
   // Disabling the schedule must flip the summary to the closed state.
   await page.getByRole('button',{name:'参数配置',exact:true}).click()
   await page.getByText('开启定时检测',{exact:true}).click()
@@ -166,8 +183,46 @@ try {
   })
   await page.locator('.live-progress').filter({hasText:'正在接收回答'}).waitFor({timeout:2500})
   assert.match(await page.locator('.live-progress').innerText(),/2\.0 KB/)
-  await page.locator('.next-run').filter({hasText:'现在'}).waitFor({timeout:2500})
-  assert.match(await nextRunText(),/（手动）/)
+  assert.match(await nextRunText(),/下次检测 —/)
+  assert.match(await page.locator('.detection-source').innerText(),/（手动）/)
+  // A newer automatic result must not hide an active manual task from deduplication.
+  await page.evaluate(()=>{
+    const f=window.__fixture,j=f.bootstrap.jobs[0]
+    f.bootstrap.jobs.unshift({...j,id:'auto-ui',source:'schedule',status:'completed',createdAt:Date.now()})
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.locator('.detection-source').filter({hasText:'（自动）'}).waitFor({timeout:2500})
+  await page.screenshot({path:resolve(root,'.cache/detection-source.png'),fullPage:true})
+  assert.equal(await page.getByRole('button',{name:'检测',exact:true}).isDisabled(),true)
+  await page.getByRole('button',{name:'停止手动队列',exact:true}).click()
+  assert.deepEqual(await page.evaluate(()=>JSON.parse(window.__calls.filter(c=>c.path==='api/cancel').at(-1).body)),{source:'manual'})
+  await page.evaluate(()=>{
+    const f=window.__fixture
+    f.bootstrap.jobs.find(j=>j.source==='manual').status='completed'
+    f.bootstrap.jobs.find(j=>j.source==='schedule').status='running'
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='检测' && !b.disabled),undefined,{timeout:2500})
+  assert.equal(await page.getByRole('button',{name:'检测',exact:true}).isEnabled(),true)
+  await page.getByLabel('选择 user@example.com',{exact:true}).locator('..').click()
+  await page.getByRole('button',{name:'检测所选（1）'}).click()
+  await page.getByRole('button',{name:'加入检测队列',exact:true}).click()
+  await page.getByText('检测已加入后台队列，离开页面后仍会继续。').waitFor()
+  await page.getByRole('button',{name:'停止自动队列',exact:true}).click()
+  assert.deepEqual(await page.evaluate(()=>JSON.parse(window.__calls.filter(c=>c.path==='api/cancel').at(-1).body)),{source:'schedule'})
+  await page.getByRole('button',{name:'检测历史',exact:true}).click()
+  await page.locator('.detection-source').filter({hasText:'（自动）'}).waitFor()
+  await page.locator('.detection-source').filter({hasText:'（手动）'}).waitFor()
+  await page.screenshot({path:resolve(root,'.cache/history.png'),fullPage:true})
+  await page.getByRole('button',{name:'账户检测',exact:true}).click()
+  // Restore the original live fixture for the report and retry regression checks.
+  await page.evaluate(()=>{
+    const f=window.__fixture
+    f.bootstrap.jobs=f.bootstrap.jobs.filter(j=>j.id!=='auto-ui')
+    f.bootstrap.jobs[0].status='running'
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.locator('.detection-source').filter({hasText:'（手动）'}).waitFor({timeout:2500})
   await page.getByRole('button',{name:'报告',exact:true}).click()
   await page.getByText('配置快照与版本',{exact:true}).waitFor()
   const reportsBeforeRetry=await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/report').length)
@@ -238,5 +293,5 @@ try {
   await frame.getByText('配置已载入表单，请核对计量 Key、目标分组和定时范围，再保存。',{exact:true}).waitFor()
   assert.deepEqual(errors,[])
   for(const path of ['api/submit','api/models','api/config','api/banks/check','api/banks/apply','api/banks/rollback','api/report','api/config/preview','api/retry-group'])assert(paths.includes(path),path)
-  console.log(JSON.stringify({ui:'passed',checks:['unclipped checkboxes on desktop and mobile','colored account statuses','auto detection summary with next run source','single save button','search','subscription filter','batch submit','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
+  console.log(JSON.stringify({ui:'passed',checks:['unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
 } finally {await browser.close()}
