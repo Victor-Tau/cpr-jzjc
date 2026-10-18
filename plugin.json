@@ -3,7 +3,7 @@
   "publisher": "personal",
   "name": "modeltrace-health",
   "displayName": "账号降智检测",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "ModelTrace 账户检测、自动复测、定时检查与指纹库在线更新",
   "license": "MIT",
   "engines": { "codex-proxy-rs": ">=3.29.1, <3.30.0" },
