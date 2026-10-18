@@ -48,9 +48,18 @@ def main():
             cfg["schedule"].update(enabled=True, scope="ids", accountIds=["acct-test"], timezone="Asia/Shanghai")
             old.request("api/config", {"config": cfg, "revision": bootstrap["configRevision"]})
             identity = old.request("api/submit", {"accountIds": ["acct-test"], "requestId": "actual-upgrade"})["submitted"][0]
-            old.tick()
-            before = old.request("api/bootstrap")
             report = old.request("api/report?id=" + identity)
+            # 1.4 defers scoring to the next maintenance callback when the callback
+            # budget runs low (cold start), so one tick no longer settles a round.
+            # Tick until the job settles: a first load after restart intentionally
+            # interrupts active jobs, which would mask the retention comparison.
+            for _ in range(5):
+                if report["status"] not in ("queued", "running"):
+                    break
+                old.tick()
+                report = old.request("api/report?id=" + identity)
+            assert report["status"] not in ("queued", "running"), "job did not settle before upgrade"
+            before = old.request("api/bootstrap")
             state = copy.deepcopy(old.state)
         finally:
             old.close()

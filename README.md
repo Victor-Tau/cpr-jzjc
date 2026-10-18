@@ -8,11 +8,16 @@
 
 在宿主「插件管理 → 安装插件 → 上传包」上传：
 
-`dist/personal.modeltrace-health-1.4.1-x86_64-unknown-linux-gnu.tar.gz`
+`dist/personal.modeltrace-health-1.4.2-x86_64-unknown-linux-gnu.tar.gz`
 
 启用后打开「账号降智检测」，进入「参数配置」选择已有计量 Key，保存后即可单号或批量检测。检测请求由宿主按指定账户 ID 执行，使用该账户绑定的代理并计入所选 Key。Key 的账户分组和模型权限仍由宿主校验。页面仅接收 Key ID 和名称。
 
 运行时首次检测会解出约91MB文件，目标目录需可写、可执行并有足够空间。自动跳过 `noexec` 临时目录，解包失败时清理残留并尝试 `/var/tmp`，兼容 Docker 中仅64MB且禁止执行的 `/tmp`。可用宿主进程的 `MODELTRACE_RUNTIME_DIR` 指定首选目录，或用 `TMPDIR` 修改系统临时目录。解包不恢复不必要的文件时间戳；异常会显示具体条目和系统错误。
+
+### 1.4.2 进度显示修复
+
+- 修复慢回答时进度长期停在「正在校验样本」的误读：回答在维护预算最后约5.5秒内到达时，有效样本已保存、评分按设计延至下一次维护回调，但阶段标签停留在校验中并累计约30秒。现在样本通过校验后阶段显示为「已获得有效样本，等待评分」。
+- 检测行为与1.4.1完全一致：评分在下一次回调执行，不重发模型请求，不消耗采样尝试。新增对应RPC回归测试。
 
 ### 1.4.1 超时修复
 
@@ -124,7 +129,7 @@ cargo build --manifest-path backend/Cargo.toml --locked
 .venv/bin/python scripts/build_runtime.py
 cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu.2.36
 cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
-.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.4.1-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.4.2-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 基础镜像已缓存时可向 `build_runtime.py` 传 `--base-tar /path/python-base.tar`。脚本验证固定镜像配置、各镜像层和NumPy wheel哈希，不依赖Docker守护进程。`scripts/package.sh` 可串联构建和校验，需在已激活的开发环境运行。
