@@ -602,6 +602,14 @@ impl Manager {
         Ok(a.enabled)
     }
     pub async fn disable(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
+        self.disable_before(host, i, None).await
+    }
+    async fn disable_before(
+        &mut self,
+        host: &HostClient,
+        i: usize,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), PluginFault> {
         if self.jobs[i].0.verdict != "degraded" {
             return Err(fault("只有已确认降智的任务可执行停用"));
         }
@@ -609,7 +617,7 @@ impl Manager {
         self.jobs[i].0.disable_error = None;
         self.jobs[i].0.action_message();
         self.save_job(host, i).await?;
-        let result = async {
+        let action = async {
             let j = &self.jobs[i].0;
             if Self::action_account(host, j).await? {
                 host::admin(
@@ -624,8 +632,13 @@ impl Manager {
                 return Err(fault("账户关闭调度后校验未通过"));
             }
             Ok(())
-        }
-        .await;
+        };
+        let result = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, action)
+                .await
+                .unwrap_or_else(|_| Err(fault("关闭调度操作超时，请重试以校验账户状态"))),
+            None => action.await,
+        };
         match result {
             Ok(()) => self.jobs[i].0.disable_state = "disabled".into(),
             Err(e) => {
@@ -637,6 +650,14 @@ impl Manager {
         self.save_job(host, i).await
     }
     pub async fn move_group(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
+        self.move_group_before(host, i, None).await
+    }
+    async fn move_group_before(
+        &mut self,
+        host: &HostClient,
+        i: usize,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), PluginFault> {
         if self.jobs[i].0.verdict != "degraded" || !self.jobs[i].0.config.auto_move_group {
             return Err(fault("只有已确认降智且开启移组的任务可执行移组"));
         }
@@ -644,7 +665,7 @@ impl Manager {
         self.jobs[i].0.group_error = None;
         self.jobs[i].0.action_message();
         self.save_job(host, i).await?;
-        let result = async {
+        let action = async {
             let j = &self.jobs[i].0;
             Self::validate_target_group(host, &j.config).await?;
             Self::action_account(host, j).await?;
@@ -665,8 +686,13 @@ impl Manager {
                 return Err(fault("账户移组后校验未通过"));
             }
             Ok(())
-        }
-        .await;
+        };
+        let result = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, action)
+                .await
+                .unwrap_or_else(|_| Err(fault("移组操作超时，请重试以校验账户状态"))),
+            None => action.await,
+        };
         match result {
             Ok(()) => self.jobs[i].0.group_state = "moved".into(),
             Err(e) => {
@@ -699,21 +725,9 @@ impl Manager {
                 self.save_job(host, i).await?;
             }
         }
-        if let Some(i) = self
-            .jobs
-            .iter()
-            .position(|(j, _)| j.disable_state == "pending")
-        {
-            return self.disable(host, i).await;
-        }
-        if let Some(i) = self
-            .jobs
-            .iter()
-            .position(|(j, _)| j.group_state == "pending")
-        {
-            return self.move_group(host, i).await;
-        }
-        if self.control.config.schedule.enabled && self.control.next_due.is_some_and(|t| t <= now())
+        if !self.jobs.iter().any(|(j, _)| j.actions_pending())
+            && self.control.config.schedule.enabled
+            && self.control.next_due.is_some_and(|t| t <= now())
         {
             let due = self.control.next_due.unwrap();
             let request = format!("schedule-{due}");
@@ -750,33 +764,59 @@ impl Manager {
             self.control.pending_schedule = None;
             return self.save(host).await;
         }
-        if self.control.config.auto_check_updates
-            && self.control.update.last_attempt_at.is_none_or(|at| {
-                now().saturating_sub(at)
-                    >= u64::from(self.control.config.update_interval_hours) * 3600000
-            })
-        {
-            return self.check_update(host).await;
-        }
-        let next = self
-            .jobs
-            .iter()
-            .enumerate()
-            .filter(|(_, (j, _))| j.active() && j.next_at <= now())
-            // Alternate ready sources so confirmation rounds from one source
-            // cannot monopolize execution while the other has queued work.
-            .min_by_key(|(_, (j, _))| {
-                (
-                    self.last_job_source.as_deref() == Some(j.source.as_str()),
-                    j.status != "running",
+        let mut visited = BTreeSet::new();
+        let mut continuing = false;
+        while self.remaining() >= std::time::Duration::from_secs(6) {
+            // Finish confirmed actions before dispatching another account. A
+            // completed action is persisted before the next one starts.
+            if let Some(i) = self
+                .jobs
+                .iter()
+                .position(|(j, _)| j.disable_state == "pending")
+            {
+                self.disable_before(
+                    host,
+                    i,
+                    self.deadline
+                        .map(|d| d - std::time::Duration::from_millis(500)),
                 )
-            })
-            .map(|(i, _)| i);
-        if let Some(i) = next
-            && self.jobs[i].0.next_at <= now()
-        {
+                .await?;
+                continuing = true;
+                continue;
+            }
+            if let Some(i) = self
+                .jobs
+                .iter()
+                .position(|(j, _)| j.group_state == "pending")
+            {
+                self.move_group_before(
+                    host,
+                    i,
+                    self.deadline
+                        .map(|d| d - std::time::Duration::from_millis(500)),
+                )
+                .await?;
+                continuing = true;
+                continue;
+            }
+            let next = self
+                .jobs
+                .iter()
+                .enumerate()
+                .filter(|(i, (j, _))| !visited.contains(i) && j.active() && j.next_at <= now())
+                // Alternate ready sources; each job gets at most one round or
+                // failed attempt in this callback, even with a zero retry delay.
+                .min_by_key(|(_, (j, _))| {
+                    (
+                        self.last_job_source.as_deref() == Some(j.source.as_str()),
+                        j.status != "running",
+                    )
+                })
+                .map(|(i, _)| i);
+            let Some(i) = next else { break };
+            visited.insert(i);
             self.last_job_source = Some(self.jobs[i].0.source.clone());
-            if let Err(e) = self.advance(host, i).await {
+            if let Err(e) = self.advance(host, i, continuing).await {
                 if !self.loaded {
                     return Err(e);
                 }
@@ -785,11 +825,39 @@ impl Manager {
                     .finish("failed", "inconclusive", e.message, now());
                 self.save_job(host, i).await?;
             }
-            return Ok(());
+            continuing = true;
         }
-        self.gc_banks(host).await
+        // Background downloads must not occupy a callback ahead of ready probes
+        // or account actions. Start them only on an idle callback.
+        let busy = self
+            .jobs
+            .iter()
+            .any(|(j, _)| j.actions_pending() || (j.active() && j.next_at <= now()));
+        if visited.is_empty() && !busy && self.remaining() >= std::time::Duration::from_secs(6) {
+            if self.remaining() >= std::time::Duration::from_secs(25)
+                && self.control.config.auto_check_updates
+                && self.control.update.last_attempt_at.is_none_or(|at| {
+                    now().saturating_sub(at)
+                        >= u64::from(self.control.config.update_interval_hours) * 3600000
+                })
+            {
+                return self.check_update(host).await;
+            }
+            self.gc_banks(host).await?;
+        }
+        Ok(())
     }
-    async fn advance(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
+    fn remaining(&self) -> std::time::Duration {
+        self.deadline
+            .map(|d| d.saturating_duration_since(tokio::time::Instant::now()))
+            .unwrap_or_default()
+    }
+    async fn advance(
+        &mut self,
+        host: &HostClient,
+        i: usize,
+        continuing: bool,
+    ) -> Result<(), PluginFault> {
         let round = self.jobs[i].0.rounds.len();
         for _ in 0..5 {
             if self.progress.is_cancelled(&self.jobs[i].0.id) {
@@ -813,7 +881,7 @@ impl Manager {
                 break;
             }
             let job = &self.jobs[i].0;
-            if !job.challenges.is_empty() && job.samples.is_empty() {
+            if !continuing && !job.challenges.is_empty() && job.samples.is_empty() {
                 let desired = if job.config.timeout_seconds == 0 {
                     self.request_window
                 } else {
@@ -964,7 +1032,7 @@ impl Manager {
         .await;
         if self.progress.is_cancelled(&self.jobs[i].0.id) {
             let request_id = match result {
-                Ok((id, _)) => Some(id),
+                Ok(result) => Some(result.request_id),
                 Err(error) => error.request_id,
             };
             self.jobs[i].0.attempts.push(Attempt {
@@ -982,32 +1050,39 @@ impl Manager {
         self.progress
             .phase(&self.jobs[i].0.id, "validating", json!({}));
         let mut permanent = false;
-        let mut diagnostics = None;
+        let diagnostics;
         let (request_id, numbers, error) = match result {
-            Ok((id, text)) => match self
-                .engine
-                .call::<_, Vec<u32>>(
-                    json!({"op":"sample","text":text,"expectedCount":challenge.expected_count}),
-                )
-                .await
-            {
-                Ok(n) => (Some(id), Some(n), None),
-                Err(e) => (Some(id), None, Some(e.message)),
-            },
+            Ok(result) => {
+                let partial = result.diagnostics.partial;
+                diagnostics = Some(result.diagnostics);
+                match self.engine.call::<_, Vec<u32>>(
+                    json!({"op":"sample","text":result.text,"expectedCount":challenge.expected_count}),
+                ).await {
+                    Ok(n) => (Some(result.request_id), Some(n), None),
+                    Err(e) => (Some(result.request_id), None, Some(if partial {
+                        format!("部分结果未通过样本校验：{}", e.message)
+                    } else { e.message })),
+                }
+            }
             Err(e) => {
                 permanent = e.permanent;
                 diagnostics = Some(e.diagnostics);
                 (e.request_id, None, Some(e.message))
             }
         };
+        let full_window_ms = self.request_window.as_millis().saturating_sub(500);
+        let full_budget_timeout = |d: &ProbeDiagnostics| {
+            d.kind == "host_budget_timeout"
+                && d.budget_ms
+                    .is_some_and(|ms| u128::from(ms) >= full_window_ms)
+        };
         let j = &mut self.jobs[i].0;
-        let repeated_budget_timeout = diagnostics
-            .as_ref()
-            .is_some_and(|d| d.kind == "host_budget_timeout")
+        let repeated_budget_timeout = diagnostics.as_ref().is_some_and(full_budget_timeout)
             && j.attempts
                 .last()
+                .filter(|a| a.error.is_some())
                 .and_then(|a| a.diagnostics.as_ref())
-                .is_some_and(|d| d.kind == "host_budget_timeout");
+                .is_some_and(full_budget_timeout);
         j.pending_probe = false;
         j.attempts.push(Attempt {
             request_id,
@@ -1020,7 +1095,17 @@ impl Manager {
                 numbers,
                 expected_count: challenge.expected_count,
             });
-            j.message = "已获得本轮有效样本，等待评分".into();
+            j.message = if j
+                .attempts
+                .last()
+                .and_then(|a| a.diagnostics.as_ref())
+                .is_some_and(|d| d.partial)
+            {
+                "已接纳本轮部分结果，样本校验通过，等待评分"
+            } else {
+                "已获得本轮有效样本，等待评分"
+            }
+            .into();
         } else if permanent || repeated_budget_timeout || j.round_attempts >= 5 {
             j.finish(
                 "failed",

@@ -20,6 +20,13 @@ DENY_TIMESTAMPS=False
 RUNTIME_TMPDIR=None
 def raw(v): return json.dumps(v,ensure_ascii=False,separators=(",",":"),allow_nan=False).encode()
 
+def model_events(*values, end=False):
+    events=[]
+    for value in values:
+        event=raw({'wire':{'protocol':'openai','payload':{'kind':'json','event':None,'data':value}}})
+        events.append(b'GPE2'+struct.pack('>III',len(event),0,0)+event)
+    return {'events':len(events),'end':end},b'HME1'+struct.pack('>I',len(events))+b''.join(struct.pack('>I',len(e)) for e in events)+b''.join(events)
+
 class Host:
     def __init__(self, binary=BINARY, state=None):
         self.send_lock=threading.Lock();self.timers=[]
@@ -27,7 +34,7 @@ class Host:
         self.enabled=True;self.streams={};self.executions=[];self.closes=0;self.fail_model=False;self.fail_download=False
         self.identity="original";self.bank=(ROOT/"vendor/modeltrace/data/unified_bank.json").read_bytes();self.sha="b"*40
         self.disable_calls=0;self.fail_disable=False;self.sequence=1
-        self.fail_put=None;self.model_read_delay=0
+        self.fail_put=None;self.model_read_delay=0;self.callback_response_delay=0
         self.additional_accounts=[]
         self.groups=[{'id':'group-test','name':'测试组'},{'id':'group-degraded','name':'降智隔离组'}]
         self.memberships=['group-test'];self.move_calls=0;self.fail_move=False;self.ignore_move=False;self.updates=[]
@@ -72,11 +79,12 @@ class Host:
                 try:result,out=self.callback(meta['method'],data,body)
                 except SimulatedFault as e:self.send({'type':'error','id':meta['id'],'error':{'code':'rejected','message':str(e),'send_state':'not_sent'}})
                 else:
+                    delay=delay or self.callback_response_delay;self.callback_response_delay=0
                     if delay:
                         timer=threading.Timer(delay,self.send,args=({'type':'result','id':meta['id']},result,out));timer.daemon=True;self.timers.append(timer);timer.start()
                     else:self.send({'type':'result','id':meta['id']},result,out)
                 finally:
-                    if delay:self.model_read_delay=delay
+                    if delay and meta['method']=='host.model.stream_read':self.model_read_delay=delay
             elif meta.get('id')==i:
                 if meta['type']=='error':raise AssertionError(meta['error'])
                 return data,body
@@ -134,7 +142,7 @@ class Host:
                 data={'items':items,'page':{'page':page,'totalPages':(len(self.groups)+199)//200}}
             elif uri.startswith('/api/admin/accounts/detail?'):
                 from urllib.parse import urlparse, parse_qs
-                account_id=parse_qs(urlparse(uri).query)['accountId'][0];assert account_id=='acct-test'
+                account_id=parse_qs(urlparse(uri).query)['accountId'][0];assert account_id in ['acct-test',*[a['id'] for a in self.additional_accounts]]
                 data={'account':{'id':account_id,'groups':[{'id':i,'name':i} for i in self.memberships]}}
             elif uri.startswith('/api/admin/accounts?'):
                 data={'items':[{'id':'acct-test','name':'test-account','email':'user@example.com','provider':'openai','enabled':self.enabled,'status':'normal','planType':'plus','groups':[{'id':i,'name':i} for i in self.memberships]}],'total':1}
@@ -239,8 +247,6 @@ class Integration(unittest.TestCase):
                 identity=self.submit();self.host.tick()
                 before=self.host.request('api/report?id='+identity)
                 self.assertEqual(before['verdict'],'degraded');self.assertEqual(len(before['rounds']),1)
-                if disable or move:self.host.request('api/delete',{'id':identity},ok=False)
-                self.host.tick(2)
                 report=self.host.request('api/report?id='+identity)
                 self.assertEqual(report['disableState'],'disabled' if disable else 'none')
                 self.assertEqual(report['groupState'],'moved' if move else 'none')
@@ -262,7 +268,7 @@ class Integration(unittest.TestCase):
                 self.assertEqual(report['disableState'],'disabled');self.assertEqual(report['groupState'],'moved');self.assertEqual(len(self.host.executions),1)
 
     def test_move_verification_retry_is_idempotent_and_uses_snapshot(self):
-        self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded');identity=self.submit();self.host.tick()
+        self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded');identity=self.submit()
         self.config(autoMoveGroup=False,targetGroupId='group-test')
         self.host.ignore_move=True;self.host.tick()
         self.assertEqual(self.host.request('api/report?id='+identity)['groupState'],'failed')
@@ -275,13 +281,17 @@ class Integration(unittest.TestCase):
             with self.subTest(changed=changed):
                 if self.host.executions:self.host.close();self.host=Host();self.addCleanup(self.host.close)
                 self.confirmed_config(autoDisable=False,autoMoveGroup=True,targetGroupId='group-degraded')
-                identity=self.submit();self.host.tick()
-                if changed=='group':self.host.groups=self.host.groups[:1]
-                else:self.host.identity='replaced'
+                identity=self.submit();original=self.host.callback
+                def callback(method,p,body):
+                    if method=='host.state.put' and p['namespace']=='jobs' and p['value'].get('groupState')=='pending':
+                        if changed=='group':self.host.groups=self.host.groups[:1]
+                        else:self.host.identity='replaced'
+                    return original(method,p,body)
+                self.host.callback=callback
                 self.host.tick();self.assertEqual(self.host.request('api/report?id='+identity)['groupState'],'failed');self.assertEqual(self.host.updates,[])
 
     def test_interrupted_move_requires_retry_without_duplicate_update(self):
-        self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded');identity=self.submit();self.host.tick()
+        self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded');identity=self.submit()
         self.host.fail_put=lambda key,value:key[0]=='jobs' and value.get('groupState')=='moved'
         with self.assertRaises(AssertionError):self.host.tick()
         self.host.fail_put=None;self.host.tick()
@@ -337,6 +347,136 @@ class Integration(unittest.TestCase):
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),5)
         self.assertTrue(all(a['diagnostics']['kind']=='request_timeout' for a in report['attempts']))
+
+    def test_timeout_accepts_valid_partial_output_and_separates_reasoning(self):
+        self.config(timeoutSeconds=1,lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();original=self.host.callback;sent=[]
+        text=','.join(str((i*i+i*97)%355+1) for i in range(240))+',35'
+        def callback(method,p,body):
+            if method=='host.model.stream_read' and not sent:
+                sent.append(True);self.host.model_read_delay=2
+                return model_events({'type':'response.reasoning_text.delta','delta':'推理内容'},
+                                    {'type':'response.output_text.delta','delta':text})
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertIsNone(report['attempts'][0]['error'])
+        d=report['attempts'][0]['diagnostics']
+        self.assertTrue(d['partial']);self.assertEqual(d['kind'],'request_timeout')
+        self.assertEqual(d['outputBytes'],len(text.encode()));self.assertEqual(d['reasoningBytes'],12)
+        self.assertGreater(d['receivedBytes'],d['outputBytes']+d['reasoningBytes'])
+        self.assertEqual(report['status'],'completed');self.assertEqual(self.host.closes,1)
+        self.assertEqual(len(self.host.executions),1)
+
+    def test_host_timeout_persists_partial_sample_and_scores_without_reprobe(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();original=self.host.callback;sent=[]
+        def callback(method,p,body):
+            if method=='host.model.stream_read' and not sent:
+                sent.append(True);self.host.model_read_delay=20
+                return model_events({'type':'response.output_text.delta','delta':'12,34,56,'*80})
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick(budget_ms=10000)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['progress']['stage'],'waiting_score')
+        self.assertEqual(len(self.host.state[('jobs',identity)]['value']['samples'][0]['numbers']),240)
+        self.assertTrue(report['attempts'][0]['diagnostics']['partial']);self.assertIsNone(report['attempts'][0]['error'])
+        self.host.model_read_delay=0;self.host.tick()
+        self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed')
+        self.assertEqual(len(self.host.executions),1)
+
+    def test_reasoning_only_timeout_never_becomes_sample(self):
+        self.config(timeoutSeconds=1,autoDisable=True,autoMoveGroup=True,targetGroupId='group-degraded')
+        identity=self.submit();original=self.host.callback;sent=[]
+        def callback(method,p,body):
+            if method=='host.model.stream_read' and not sent:
+                sent.append(True);self.host.model_read_delay=2
+                return model_events({'type':'response.reasoning_summary_text.delta','delta':'12,34,56,'*100})
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick()
+        report=self.host.request('api/report?id='+identity);d=report['attempts'][0]['diagnostics']
+        self.assertEqual(d['outputBytes'],0);self.assertGreater(d['reasoningBytes'],0)
+        self.assertIsNotNone(report['attempts'][0]['error']);self.assertEqual(self.host.state[('jobs',identity)]['value']['samples'],[])
+        self.assertEqual(self.host.disable_calls+self.host.move_calls,0)
+
+    def test_partial_eof_and_output_limit_use_sample_validation_but_failure_does_not(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        original=self.host.callback
+        for index,termination in enumerate(['eof','limit','short','failed','filtered','malformed']):
+            with self.subTest(termination=termination):
+                identity=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':f'partial-{index}'})['submitted'][0]
+                def callback(method,p,body):
+                    if method=='host.model.stream_read':
+                        text='12,34,' if termination=='short' else '12,34,56,'*80
+                        delta={'type':'response.output_text.delta','delta':text}
+                        if termination=='limit':return model_events(delta,{'type':'response.incomplete','response':{'incomplete_details':{'reason':'max_output_tokens'}}},end=True)
+                        if termination=='failed':return model_events(delta,{'type':'response.failed'},end=True)
+                        if termination=='filtered':return model_events(delta,{'type':'response.incomplete','response':{'incomplete_details':{'reason':'content_filter'}}},end=True)
+                        if termination=='malformed':return {'events':2,'end':True},model_events(delta,end=True)[1]
+                        return model_events(delta,end=True)
+                    return original(method,p,body)
+                self.host.callback=callback
+                # Cold preparation can yield to preserve the full request
+                # window, especially while artifact checks run concurrently.
+                for _ in range(3):
+                    self.host.tick();report=self.host.request('api/report?id='+identity)
+                    if report['attempts']:break
+                if termination in ['eof','limit']:
+                    if report['status']=='running' and report['attempts'] and report['attempts'][0]['error'] is None:
+                        self.host.tick();report=self.host.request('api/report?id='+identity)
+                    self.assertEqual(report['status'],'completed');self.assertTrue(report['attempts'][0]['diagnostics']['partial'])
+                else:
+                    self.host.request('api/cancel',{'id':identity})
+                    self.assertIsNotNone(report['attempts'][0]['error']);self.assertEqual(report['rounds'],[])
+
+    def test_completed_event_closes_lingering_stream_without_waiting_for_eof(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();original=self.host.callback;reads=[]
+        def callback(method,p,body):
+            result,payload=original(method,p,body)
+            if method=='host.model.stream_read':
+                reads.append(True);self.assertEqual(len(reads),1);result['end']=False
+            return result,payload
+        self.host.callback=callback;self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'completed');self.assertFalse(report['attempts'][0]['diagnostics']['partial'])
+        self.assertEqual(self.host.closes,1)
+
+    def test_batch_continues_in_same_callback_after_confirmed_move(self):
+        self.host.additional_accounts=[{'id':'acct-two','name':'second','provider':'openai','enabled':True,'status':'normal','planType':'plus','groups':[]}]
+        self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded')
+        ids=self.host.request('api/submit',{'accountIds':['acct-test','acct-two'],'requestId':'continuous-batch'})['submitted']
+        original=self.host.callback;order=[]
+        def callback(method,p,body):
+            if method=='host.model.execute_stream':
+                if order:
+                    self.assertEqual(self.host.state[('jobs',ids[0])]['value']['groupState'],'moved')
+                order.append(p['account_id'])
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick()
+        self.assertEqual(len(self.host.executions),2)
+        for identity in ids:
+            report=self.host.request('api/report?id='+identity)
+            self.assertEqual(report['verdict'],'degraded');self.assertEqual(report['groupState'],'moved')
+        self.assertEqual(order,['acct-test','acct-two'])
+        self.assertEqual(self.host.move_calls,1) # Mock memberships are shared, so the second move is already satisfied.
+
+    def test_slow_move_saves_failure_before_budget_and_retry_verifies_without_duplicate(self):
+        self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded')
+        identity=self.submit();original=self.host.callback
+        def callback(method,p,body):
+            result=original(method,p,body)
+            if method=='host.http.dispatch' and '/accounts/batch-update' in p['uri']:
+                self.host.callback_response_delay=20
+            return result
+        self.host.callback=callback;started=time.monotonic();self.host.tick(budget_ms=10000)
+        report=self.host.request('api/report?id='+identity)
+        self.assertLess(time.monotonic()-started,10)
+        self.assertEqual(report['groupState'],'failed');self.assertIn('超时',report['groupError'])
+        self.assertEqual(self.host.move_calls,1)
+        self.host.request('api/retry-group',{'id':identity})
+        self.assertEqual(self.host.request('api/report?id='+identity)['groupState'],'moved')
+        self.assertEqual(self.host.move_calls,1);self.assertEqual(len(self.host.executions),1)
 
     def test_registration_and_queries(self):
         _,payload=self.host.call('management.register',stage='registration');registration=json.loads(payload);self.assertIn('api/report',[r['path'] for r in registration['routes']])
@@ -441,10 +581,10 @@ class Integration(unittest.TestCase):
     def test_three_round_confirmation_and_disable_retry(self):
         models=[m['id'] for m in json.loads(self.host.bank)['models']]
         self.config(autoDisable=True,degradedModels=models,lowConfidencePercent=0,degradedPercent=0,confirmationRounds=3)
-        identity=self.submit();self.host.tick(3)
+        identity=self.submit();self.host.tick(2);self.host.fail_disable=True;self.host.tick()
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['verdict'],'degraded');self.assertEqual(len(report['rounds']),3);self.assertEqual(self.host.disable_calls,0)
-        self.host.fail_disable=True;self.host.tick();report=self.host.request('api/report?id='+identity);self.assertEqual(report['disableState'],'failed')
+        self.assertEqual(report['disableState'],'failed')
         self.host.fail_disable=False;self.host.request('api/retry-disable',{'id':identity});self.assertEqual(self.host.disable_calls,1);self.assertEqual(len(self.host.executions),3)
     def test_schedule_dynamic_scope_and_deduplication(self):
         c=self.config();c['schedule'].update({'enabled':True,'filter':{'plan':'plus','status':'normal','group':'group-test','keyword':'USER@'}})
@@ -483,7 +623,7 @@ class Integration(unittest.TestCase):
         scheduled=self.host.request('api/jobs')['jobs'][0]['id']
         manual=self.submit()
         # Both ready sources get a round before either consumes its retest budget.
-        self.host.tick(2)
+        self.host.tick()
         for identity in [scheduled,manual]:
             report=self.host.request('api/report?id='+identity)
             self.assertEqual(len(report['rounds']),1)

@@ -178,11 +178,11 @@ try {
   await page.evaluate(()=>{
     const f=window.__fixture,j=f.bootstrap.jobs[0]
     j.status=f.report.status='running'
-    j.progress=f.report.progress={stage:'receiving',stageStartedAt:Date.now()-2000,updatedAt:Date.now(),detail:{receivedBytes:2048}}
+    j.progress=f.report.progress={stage:'receiving',stageStartedAt:Date.now()-2000,updatedAt:Date.now(),detail:{receivedBytes:2048,outputBytes:512,reasoningBytes:1024}}
     f.revision++;document.dispatchEvent(new Event('visibilitychange'))
   })
   await page.locator('.live-progress').filter({hasText:'正在接收回答'}).waitFor({timeout:2500})
-  assert.match(await page.locator('.live-progress').innerText(),/2\.0 KB/)
+  assert.match(await page.locator('.live-progress').innerText(),/正文 0\.5 KB · 推理 1\.0 KB/)
   assert.match(await nextRunText(),/下次检测 —/)
   assert.match(await page.locator('.detection-source').innerText(),/（手动）/)
   // A newer automatic result must not hide an active manual task from deduplication.
@@ -228,7 +228,7 @@ try {
   const reportsBeforeRetry=await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/report').length)
   await page.evaluate(()=>{
     const f=window.__fixture,j=f.bootstrap.jobs[0]
-    f.report.attempts.push({requestId:'retry-request',at:Date.now(),error:'宿主调用预算超时',diagnostics:{kind:'host_budget_timeout',elapsedMs:28000,budgetMs:27900,receivedBytes:2048}})
+    f.report.attempts.push({requestId:'retry-request',at:Date.now(),error:'宿主调用预算超时',diagnostics:{kind:'host_budget_timeout',elapsedMs:28000,budgetMs:27900,receivedBytes:2048,outputBytes:512,reasoningBytes:1024}})
     j.attemptCount=f.report.attempts.length;j.roundAttempts=f.report.roundAttempts=1
     j.message=f.report.message='宿主调用预算超时；等待重试'
     j.progress=f.report.progress={stage:'waiting_retry',stageStartedAt:Date.now(),updatedAt:Date.now(),detail:{nextAt:Date.now()+10000}}
@@ -238,7 +238,7 @@ try {
   assert(await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/report').length)>reportsBeforeRetry)
   assert.match(await page.getByRole('status').filter({hasText:'宿主调用预算超时；等待重试'}).last().innerText(),/本轮已尝试 1\/5 次/)
   await page.getByText('请求记录（2）',{exact:true}).click()
-  await page.getByText('耗时 28.0 秒 · 已接收 2.0 KB',{exact:false}).waitFor()
+  await page.getByText('耗时 28.0 秒 · 正文 0.5 KB · 推理 1.0 KB · 流数据 2.0 KB',{exact:false}).waitFor()
   await page.evaluate(()=>{
     const f=window.__fixture
     f.bootstrap.jobs[0].progress=f.report.progress={stage:'scoring',stageStartedAt:Date.now(),updatedAt:Date.now(),detail:{}}
@@ -249,10 +249,13 @@ try {
   await page.evaluate(()=>{
     const f=window.__fixture,j=f.bootstrap.jobs[0]
     f.report.rounds.push({...f.report.rounds[0],number:2})
+    f.report.attempts.push({requestId:'partial-request',at:Date.now(),error:null,diagnostics:{kind:'request_timeout',elapsedMs:1000,budgetMs:1000,receivedBytes:2048,outputBytes:512,reasoningBytes:1024,partial:true}})
+    j.attemptCount=f.report.attempts.length
     j.roundCount=2;j.status=f.report.status='completed';j.message=f.report.message='本轮检测已自动完成'
     delete j.progress;delete f.report.progress;f.revision++
   })
   await page.getByRole('status').filter({hasText:'本轮检测已自动完成'}).last().waitFor({timeout:2500})
+  await page.getByText('已接纳部分结果（样本校验通过）',{exact:true}).waitFor()
   assert(await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/report').length)>beforeReportCalls)
   assert.match(await page.getByLabel('报告轮次',{exact:true}).innerText(),/第2轮/)
   await page.evaluate(()=>{

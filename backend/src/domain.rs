@@ -327,6 +327,12 @@ pub struct ProbeDiagnostics {
     pub kind: String,
     pub elapsed_ms: u64,
     pub received_bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_bytes: Option<usize>,
+    #[serde(default)]
+    pub partial: bool,
     pub budget_ms: Option<u64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
