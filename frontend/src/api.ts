@@ -26,7 +26,6 @@ export const api = {
   models: (key: string) => request<{ models: string[] }>('GET', `api/models?keyId=${encodeURIComponent(key)}`),
   progress: (since?: string) => request<{ revision: string; changed: boolean; jobs: Job[] | null; nextDue: number | null; scheduleError: string | null }>('GET', `api/progress${since === undefined ? '' : `?since=${encodeURIComponent(since)}`}`),
   jobs: () => request<{ jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null }>('GET', 'api/jobs'),
-  costs: (ids: string[]) => request<{ jobs: Job[] | null }>('POST', 'api/costs', { ids }),
   report: (id: string) => request<Report>('GET', `api/report?id=${encodeURIComponent(id)}`),
   save: (config: Config, revision: number) => request<{ revision: number; config: Config }>('POST', 'api/config', { config, revision }),
   previewConfig: (config: unknown) => request<{ config: Config }>('POST', 'api/config/preview', { config }),

@@ -10,7 +10,6 @@ import { ZPagination } from '@codex-proxy/ui/pagination'
 import { ZTag } from '@codex-proxy/ui/tag'
 import { ZDialog } from '@codex-proxy/ui/dialog'
 import Settings from './components/Settings.vue'
-import DetectionCost from './components/DetectionCost.vue'
 import { api, active, date, percent, status, verdict } from './api'
 import { createRequestId } from './request-id'
 import type { Account, Banks, Config, Group, Job, Report } from './types'
@@ -24,7 +23,6 @@ const historySearch = ref(''), historyVerdict = ref(''), historyPage = ref(1), h
 const report = ref<Report>(), reportOpen = ref(false), roundIndex = ref(0)
 const confirmIds = ref<string[]>([]), confirmOpen = ref(false)
 let timer: ReturnType<typeof setTimeout> | undefined, clockTimer: ReturnType<typeof setInterval> | undefined, polling = false, disposed = false, failures = 0, progressRevision: string | undefined
-let lastCostSync = 0
 const clock = ref(Date.now())
 const requestIds = new Map<string,string>()
 const plans = computed(() => [{ value:'',label:'全部订阅' }, ...Array.from(new Set(accounts.value.map(a => a.planType || 'unknown'))).sort().map(p => ({ value:p,label:p }))])
@@ -110,7 +108,7 @@ async function refreshProgress() {
   const current=report.value
   if (reportOpen.value && current) {
     const job=r.jobs.find(j=>j.id===current.id)
-    if (job && (job.attemptCount!==current.attempts.length || job.roundCount!==current.rounds.length || job.status!==current.status || job.disableState!==current.disableState || job.groupState!==current.groupState || JSON.stringify(job.usage)!==JSON.stringify(current.usage))) {
+    if (job && (job.attemptCount!==current.attempts.length || job.roundCount!==current.rounds.length || job.status!==current.status || job.disableState!==current.disableState || job.groupState!==current.groupState)) {
       const updated=await api.report(current.id)
       if (reportOpen.value && report.value?.id===current.id) {
         const followingLatest=roundIndex.value>=current.rounds.length-1
@@ -127,23 +125,10 @@ function schedulePoll(delay?: number) {
   if (disposed || document.hidden) return
   timer=setTimeout(poll,delay ?? (failures ? Math.min(30000,1000*2**failures) : (activeJobs.value || jobs.value.some(j=>[j.disableState,j.groupState].some(s=>['pending','attempting'].includes(s)))) ? 1000 : 10000))
 }
-async function refreshCosts() {
-  if (Date.now()-lastCostSync < 30000) return
-  const ids=jobs.value.filter(j=>!active(j) && j.attemptCount>0 && !j.usage?.complete).slice(0,20).map(j=>j.id)
-  if (!ids.length) return
-  lastCostSync=Date.now()
-  try {
-    const result=await api.costs(ids)
-    if (disposed || !result.jobs) return
-    const usage=new Map(result.jobs.map(j=>[j.id,j.usage]))
-    jobs.value=jobs.value.map(j=>({...j,usage:usage.get(j.id) ?? j.usage}))
-    if (report.value && usage.has(report.value.id)) report.value.usage=usage.get(report.value.id)
-  } catch { /* Usage may arrive after the detection result; retry on the next poll. */ }
-}
 async function poll() {
   if (disposed || document.hidden || polling) return
   polling=true
-  try { await refreshProgress(); await refreshCosts(); failures=0 } catch(e) { failures++; if (failures>=3) error.value=(e as Error).message }
+  try { await refreshProgress(); failures=0 } catch(e) { failures++; if (failures>=3) error.value=(e as Error).message }
   finally { polling=false; schedulePoll() }
 }
 function visibilityChanged() { if (document.hidden) {if(timer) clearTimeout(timer)} else {clock.value=Date.now(); schedulePoll(0)} }
@@ -180,7 +165,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
         <template #plan="{row}"><ZTag size="small">{{ row.planType || '未知' }}</ZTag></template>
         <template #groups="{row}"><div class="tags"><ZTag v-for="g in row.groups" :key="g.id" size="small">{{ g.name }}</ZTag><span v-if="!row.groups.length" class="muted">未分组</span></div></template>
         <template #status="{row}"><span class="account-status" :class="accountStatusClass(row)">{{ status(row) }}</span></template>
-        <template #result="{row}"><div v-if="!row.supported" class="muted">暂不支持此提供方</div><div v-else-if="jobOf(row)" class="result"><div class="result-line"><b :class="{danger:jobOf(row)?.verdict==='degraded',success:jobOf(row)?.verdict==='no_match'}">{{ verdict(active(jobOf(row)) ? jobOf(row)!.status : jobOf(row)!.status !== 'completed' ? jobOf(row)!.status : jobOf(row)!.verdict) }}</b><DetectionCost v-if="!active(jobOf(row))" :usage="jobOf(row)?.usage" :attempt-count="jobOf(row)?.attemptCount" /></div><small v-if="jobOf(row)?.prediction">{{ jobOf(row)?.prediction }} · {{ percent(jobOf(row)?.probability) }}</small><small class="live-progress" role="status">{{ progressText(jobOf(row)!) }}</small></div><span v-else class="muted">尚未检测</span></template>
+        <template #result="{row}"><div v-if="!row.supported" class="muted">暂不支持此提供方</div><div v-else-if="jobOf(row)" class="result"><div class="result-line"><b :class="{danger:jobOf(row)?.verdict==='degraded',success:jobOf(row)?.verdict==='no_match'}">{{ verdict(active(jobOf(row)) ? jobOf(row)!.status : jobOf(row)!.status !== 'completed' ? jobOf(row)!.status : jobOf(row)!.verdict) }}</b></div><small v-if="jobOf(row)?.prediction">{{ jobOf(row)?.prediction }} · {{ percent(jobOf(row)?.probability) }}</small><small class="live-progress" role="status">{{ progressText(jobOf(row)!) }}</small></div><span v-else class="muted">尚未检测</span></template>
         <template #time="{row}"><span class="date">{{ date(jobOf(row)?.finishedAt || jobOf(row)?.createdAt) }}<em v-if="jobOf(row)" class="detection-source" :class="jobOf(row)?.source === 'schedule' ? 'auto' : 'manual'">{{ jobOf(row)?.source === 'schedule' ? '（自动）' : '（手动）' }}</em></span></template>
         <template #actions="{row}"><div class="inline"><ZButton size="small" :disabled="!canDetect(row) || busy" @click="openSubmit([row.id])">检测</ZButton><ZButton v-if="jobOf(row)" size="small" variant="text" :disabled="busy" @click="openReport(jobOf(row)!.id)">报告</ZButton></div></template>
       </ZTable><ZPagination v-model:current-page="page" v-model:page-size="pageSize" :total="filtered.length" :page-sizes="[10,20,50,100]" />
@@ -190,12 +175,12 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
       <div class="section-heading"><div><h2>检测历史</h2><p>保留各轮概率、参数及指纹库版本。</p></div><ZButton :disabled="busy" @click="action(refreshJobs)">刷新</ZButton></div>
       <div class="toolbar"><ZInput v-model="historySearch" class="search" placeholder="搜索账户" clearable aria-label="搜索历史账户" /><ZSelect v-model="historyVerdict" class="filter" :options="[{value:'',label:'全部结论'},...['degraded','no_match','inconclusive','running','queued','failed','interrupted','cancelled'].map(v=>({value:v,label:verdict(v)}))]" aria-label="历史结论筛选" /></div>
       <ZTable :columns="historyColumns" :data="visibleHistory" :row-key="j=>j.id" empty-text="还没有检测记录">
-        <template #account="{row}"><b>{{ row.accountName }}</b></template><template #result="{row}"><div class="result-line"><span :class="{danger:row.verdict==='degraded'}">{{ verdict(row.status==='completed'?row.verdict:row.status) }}</span><DetectionCost v-if="!active(row)" :usage="row.usage" :attempt-count="row.attemptCount" /></div></template><template #model="{row}">{{ row.prediction || '—' }}</template><template #probability="{row}">{{ percent(row.probability) }}</template><template #createdAt="{row}"><span class="date">{{ date(row.createdAt) }}<em class="detection-source" :class="row.source === 'schedule' ? 'auto' : 'manual'">{{ row.source === 'schedule' ? '（自动）' : '（手动）' }}</em></span></template><template #actions="{row}"><div class="inline"><ZButton size="small" variant="text" :disabled="busy" @click="openReport(row.id)">报告</ZButton><ZButton v-if="active(row)" size="small" variant="text" :disabled="busy" @click="cancel(row.id)">取消</ZButton><ZButton v-else size="small" variant="text" :disabled="busy" @click="remove(row.id)">删除</ZButton></div></template>
+        <template #account="{row}"><b>{{ row.accountName }}</b></template><template #result="{row}"><div class="result-line"><span :class="{danger:row.verdict==='degraded'}">{{ verdict(row.status==='completed'?row.verdict:row.status) }}</span></div></template><template #model="{row}">{{ row.prediction || '—' }}</template><template #probability="{row}">{{ percent(row.probability) }}</template><template #createdAt="{row}"><span class="date">{{ date(row.createdAt) }}<em class="detection-source" :class="row.source === 'schedule' ? 'auto' : 'manual'">{{ row.source === 'schedule' ? '（自动）' : '（手动）' }}</em></span></template><template #actions="{row}"><div class="inline"><ZButton size="small" variant="text" :disabled="busy" @click="openReport(row.id)">报告</ZButton><ZButton v-if="active(row)" size="small" variant="text" :disabled="busy" @click="cancel(row.id)">取消</ZButton><ZButton v-else size="small" variant="text" :disabled="busy" @click="remove(row.id)">删除</ZButton></div></template>
       </ZTable><ZPagination v-model:current-page="historyPage" v-model:page-size="historySize" :total="history.length" :page-sizes="[10,20,50,100]" />
     </template>
     <ZDialog v-model="confirmOpen" title="开始账户检测" width="32rem" :close-on-click-modal="!busy"><p>将 {{ confirmIds.length }} 个账户加入检测队列，请求模型为 <b>{{ config?.requestModel }}</b>，使用所选计量 Key。</p><p>每轮只检测一次，失败时最多尝试五次；确认与低置信度复测会追加轮次。</p><p v-if="config?.autoDisable" class="danger">已开启：确认降智后自动关闭该账户调度。</p><p v-if="config?.autoMoveGroup" class="danger">已开启：确认降智后移入 {{ allGroups.find(g=>g.id===config?.targetGroupId)?.name || config?.targetGroupId }}，替换原有分组。</p><p v-if="error" class="danger">{{ error }}</p><template #footer><ZButton :disabled="busy" @click="confirmOpen=false">取消</ZButton><ZButton type="primary" :loading="busy" @click="submit">加入检测队列</ZButton></template></ZDialog>
     <ZDialog v-model="reportOpen" title="检测报告" width="60rem">
-      <template v-if="report"><div class="section-heading"><div><h3>{{ report.accountName }}</h3><div v-if="!['queued','running'].includes(report.status)" class="result-line report-result"><b :class="{danger:report.verdict==='degraded'}">{{ verdict(report.status==='completed'?report.verdict:report.status) }}</b><DetectionCost :usage="report.usage" :attempt-count="report.attempts.length" /></div><p :class="{danger:report.verdict==='degraded'}" role="status" aria-live="polite">{{ progressText(report) }}</p></div><ZButton :disabled="busy" @click="openReport(report.id)">刷新报告</ZButton></div><div class="report-meta"><span>请求模型 <b>{{ report.config.requestModel }}</b></span><span>指纹库 <code>{{ report.bankCommit?.slice(0,12) }}</code></span><span>采样尝试 {{ report.attempts.length }}</span></div><p v-if="report.disableState==='failed'" class="danger">关闭调度操作失败：{{ report.disableError || '请检查宿主状态' }}。<ZButton size="small" :disabled="busy" @click="retryDisable(report.id)">重试关闭调度</ZButton></p><p v-if="report.groupState==='failed'" class="danger">移组操作失败：{{ report.groupError || '请检查宿主状态' }}。<ZButton size="small" :disabled="busy" @click="retryGroup(report.id)">重试移入分组</ZButton></p><ZSelect v-if="report.rounds.length" v-model="roundIndex" :options="report.rounds.map((r,i)=>({value:i,label:`第${r.number}轮 · ${verdict(r.verdict)} · ${date(r.finishedAt)}`}))" aria-label="报告轮次" />
+      <template v-if="report"><div class="section-heading"><div><h3>{{ report.accountName }}</h3><div v-if="!['queued','running'].includes(report.status)" class="result-line report-result"><b :class="{danger:report.verdict==='degraded'}">{{ verdict(report.status==='completed'?report.verdict:report.status) }}</b></div><p :class="{danger:report.verdict==='degraded'}" role="status" aria-live="polite">{{ progressText(report) }}</p></div><ZButton :disabled="busy" @click="openReport(report.id)">刷新报告</ZButton></div><div class="report-meta"><span>请求模型 <b>{{ report.config.requestModel }}</b></span><span>指纹库 <code>{{ report.bankCommit?.slice(0,12) }}</code></span><span>采样尝试 {{ report.attempts.length }}</span></div><p v-if="report.disableState==='failed'" class="danger">关闭调度操作失败：{{ report.disableError || '请检查宿主状态' }}。<ZButton size="small" :disabled="busy" @click="retryDisable(report.id)">重试关闭调度</ZButton></p><p v-if="report.groupState==='failed'" class="danger">移组操作失败：{{ report.groupError || '请检查宿主状态' }}。<ZButton size="small" :disabled="busy" @click="retryGroup(report.id)">重试移入分组</ZButton></p><ZSelect v-if="report.rounds.length" v-model="roundIndex" :options="report.rounds.map((r,i)=>({value:i,label:`第${r.number}轮 · ${verdict(r.verdict)} · ${date(r.finishedAt)}`}))" aria-label="报告轮次" />
       <template v-if="currentRound"><div class="family-summary"><ZTag v-for="f in currentRound.score.families" :key="f.family">{{ f.display_name }} {{ percent(f.probability) }}</ZTag></div><div class="probabilities"><div v-for="r in currentRound.score.results" :key="r.model" class="probability-row"><span>{{ r.label }}</span><div class="bar"><i :style="{width:`${r.probability*100}%`}" /></div><b>{{ percent(r.probability) }}</b></div></div></template><p v-else class="muted">尚无完整轮次结果。</p>
       <details><summary>配置快照与版本</summary><pre>{{ JSON.stringify({config:report.config,bankHash:report.bankHash,bankCommit:report.bankCommit,engineCommit:report.engineCommit},null,2) }}</pre></details><details><summary>请求记录（{{ report.attempts.length }}）</summary><ul class="attempts"><li v-for="(a,i) in report.attempts" :key="i"><time>{{ date(a.at) }}</time><code>{{ a.requestId || '未取得请求ID' }}</code><span>{{ a.error || (a.diagnostics?.partial ? '已接纳部分结果（样本校验通过）' : '有效样本') }}</span><small v-if="a.diagnostics">耗时 {{ (a.diagnostics.elapsedMs/1000).toFixed(1) }} 秒<template v-if="a.diagnostics.outputBytes != null"> · 正文 {{ (a.diagnostics.outputBytes/1024).toFixed(1) }} KB</template> · 流数据 {{ (a.diagnostics.receivedBytes/1024).toFixed(1) }} KB<span v-if="a.diagnostics.budgetMs != null"> · 本次请求窗口 {{ (a.diagnostics.budgetMs/1000).toFixed(1) }} 秒</span></small></li></ul></details></template>
     </ZDialog>

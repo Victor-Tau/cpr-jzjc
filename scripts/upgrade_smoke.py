@@ -38,7 +38,7 @@ def main():
                 archive.extractall(root, filter="data")
         manifests = [json.loads((root / "plugin.json").read_text()) for root in roots]
         assert manifests[0]["state"] == manifests[1]["state"]
-        old = Host(binary=roots[0] / "bin/modeltrace-health")
+        old = Host(binary=roots[0] / "bin/modeltrace-health", protocol_version=manifests[0]["package"]["protocolVersion"])
         try:
             bootstrap = old.request("api/bootstrap")
             cfg = bootstrap["config"]
@@ -63,7 +63,7 @@ def main():
             state = copy.deepcopy(old.state)
         finally:
             old.close()
-        current = Host(binary=roots[1] / "bin/modeltrace-health", state=state)
+        current = Host(binary=roots[1] / "bin/modeltrace-health", state=state, protocol_version=manifests[1]["package"]["protocolVersion"])
         try:
             after = current.request("api/bootstrap")
             restored = current.request("api/report?id=" + identity)
@@ -82,8 +82,8 @@ def main():
                     for attempt in previous:
                         # v1.4.1 adds optional timing diagnostics; old requests have none.
                         attempt.setdefault("diagnostics", None)
-                        attempt.setdefault("usage", None)
-                        attempt.setdefault("costCheckedAt", 0)
+                        attempt.pop("usage", None)
+                        attempt.pop("costCheckedAt", None)
                         if attempt['diagnostics'] is not None:
                             attempt['diagnostics'].setdefault('partial', False)
                 equivalent(previous, restored[key])

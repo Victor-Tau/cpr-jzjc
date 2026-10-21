@@ -26,7 +26,6 @@ try {
       else if(input.path==='api/progress'){const revision='ui:'+f.revision,changed=new URLSearchParams(input.query).get('since')!==revision;result={revision,changed,jobs:changed?b.jobs:null,nextDue:b.nextDue,scheduleError:null}}
       else if(input.path==='api/jobs')result={jobs:b.jobs,banks:b.banks,nextDue:b.nextDue,scheduleError:null}
       else if(input.path==='api/report')result=f.report
-      else if(input.path==='api/costs')result={jobs:b.jobs}
       else if(input.path==='api/models')result={models:['gpt-6.1-sol','gpt-5.6-luna']}
       else if(input.path==='api/config'){const data=JSON.parse(input.body);b.config=data.config;b.configRevision++;result={config:data.config,revision:b.configRevision}}
       else if(input.path==='api/config/preview')result={config:JSON.parse(input.body).config}
@@ -47,12 +46,13 @@ try {
   await page.goto('http://plugin.test/')
   await page.getByRole('textbox',{name:'搜索账户',exact:true}).waitFor()
   await page.getByText('未降智',{exact:true}).first().waitFor()
-  await page.getByText('费用 $0.0123456789012',{exact:true}).first().waitFor()
   assert.equal(await page.getByText('未命中降智规则',{exact:true}).count(),0)
-  const resultLine=page.locator('.result-line').filter({hasText:'未降智'}).first()
-  assert.equal(await resultLine.locator('.detection-cost').count(),1)
-  const aligned=await resultLine.evaluate(el=>{const a=el.firstElementChild.getBoundingClientRect(),b=el.lastElementChild.getBoundingClientRect();return Math.abs((a.top+a.bottom)-(b.top+b.bottom))<4 && b.left>a.right})
-  assert(aligned,'cost should appear to the right on the same result line')
+  const assertNoUsage = async () => {
+    assert.equal(await page.locator('.detection-cost').count(),0)
+    assert.doesNotMatch(await page.locator('body').innerText(),/费用|待同步/)
+    assert.equal(await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/costs').length),0)
+  }
+  await assertNoUsage()
   // The complete visual checkbox must fit inside its cell and remain clickable.
   const assertSelectionVisible = async () => {
     const rows = await page.locator('tbody tr').evaluateAll(rows => rows.map(row => {
@@ -140,7 +140,9 @@ try {
   await page.getByRole('button',{name:'检测历史',exact:true}).click()
   await page.getByRole('button',{name:'报告',exact:true}).first().click()
   await page.getByText('配置快照与版本',{exact:true}).waitFor()
-  await page.screenshot({path:resolve(root,'.cache/report.png'),fullPage:true})
+  await page.getByRole('dialog',{name:'检测报告',exact:true}).waitFor()
+  await assertNoUsage()
+  await page.screenshot({path:resolve(root,'.cache/report.png'),fullPage:true,animations:'disabled'})
   await page.keyboard.press('Escape')
   await page.setViewportSize({width:430,height:932})
   await page.getByRole('button',{name:'参数配置',exact:true}).click()
@@ -303,7 +305,8 @@ try {
   await frame.getByRole('status').filter({hasText:'modeltrace-health-config.json'}).waitFor()
   await frame.getByLabel('配置文件',{exact:true}).setInputFiles({name:'backup.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(json))})
   await frame.getByText('配置已载入表单，请核对计量 Key、目标分组和定时范围，再保存。',{exact:true}).waitFor()
+  await assertNoUsage()
   assert.deepEqual(errors,[])
   for(const path of ['api/submit','api/models','api/config','api/banks/check','api/banks/apply','api/banks/rollback','api/report','api/config/preview','api/retry-group'])assert(paths.includes(path),path)
-  console.log(JSON.stringify({ui:'passed',checks:['unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
+  console.log(JSON.stringify({ui:'passed',checks:['usage display and polling removed','unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
 } finally {await browser.close()}

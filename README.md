@@ -4,23 +4,29 @@
 
 ## 安装
 
-适配 **Codex Proxy RS >=3.29.1、<3.30.0**，发布包适用于 Linux x86_64、glibc 2.36+。运行模式为 `trustedProcess`。安装包包含私有 Python/NumPy 评分运行时，无需安装系统 Python 或单独运行 ModelTrace 服务。
+适配 **Codex Proxy RS >=3.29.7、<3.30.0**，发布包适用于 Linux x86_64、glibc 2.36+。运行模式为 `trustedProcess`。安装包包含私有 Python/NumPy 评分运行时，无需安装系统 Python 或单独运行 ModelTrace 服务。
 
 在宿主「插件管理 → 安装插件 → 上传包」上传：
 
-`dist/personal.modeltrace-health-1.5.0-x86_64-unknown-linux-gnu.tar.gz`
+`dist/personal.modeltrace-health-1.5.1-x86_64-unknown-linux-gnu.tar.gz`
 
 启用后打开「账号降智检测」，进入「参数配置」选择已有计量 Key，保存后即可单号或批量检测。检测请求由宿主按指定账户 ID 执行，使用该账户绑定的代理并计入所选 Key。Key 的账户分组和模型权限仍由宿主校验。页面仅接收 Key ID 和名称。
 
 运行时首次检测会解出约91MB文件，目标目录需可写、可执行并有足够空间。自动跳过 `noexec` 临时目录，解包失败时清理残留并尝试 `/var/tmp`，兼容 Docker 中仅64MB且禁止执行的 `/tmp`。可用宿主进程的 `MODELTRACE_RUNTIME_DIR` 指定首选目录，或用 `TMPDIR` 修改系统临时目录。解包不恢复不必要的文件时间戳；异常会显示具体条目和系统错误。
 
-### 1.5.0 请求窗口、评分提速与检测费用
+### 1.5.1 宿主与插件包更新
+
+- 使用 Codex Proxy RS 3.29.7 对应提交的 SDK 和打包工具重新编译，适配插件 RPC v5、字节形式 HTTP 头及响应元数据；最低宿主版本为3.29.7，旧版宿主请继续使用1.5.0。
+- UI 组件包更新至 `@codex-proxy/ui` 0.5.0。
+- 删除1.5.0新增的用量与费用显示，同时删除费用查询、汇总和后台同步。
+- 保留原有请求窗口与评分提速；更新现有实例时保留配置、自动计划、指纹库、检测历史和提交去重，兼容历史记录中的旧费用字段。
+
+### 1.5.0 请求窗口与评分提速
 
 - 单次30秒维护回调中的请求上限从约28秒调整为约29秒，保留流清理、样本校验、评分和保存的时间。
 - 请求前预加载本次指纹库；有效样本不再固定等待剩余6秒才评分，利用当次回调的剩余预算立即评分。仅在实际预算不足时保留样本，下一次优先评分，不重发请求。
 - 账户列表、历史和报告将「未命中降智规则」显示为「未降智」，删除进度与请求记录中的推理KB字段。
-- 检测结束后，结果同一行右侧显示平台使用统计中的费用，按请求ID汇总本次全部尝试和复测，按币种分别累计。金额使用十进制字符串精确相加；已知零费用显示0，未返回完整费用显示「待同步」，之后自动补全。费用同步有独立时间上限，不阻止检测完成。
-- 原实例升级保留配置、自动计划、指纹库和历史；旧报告的费用可按已有请求ID补全。
+- 原实例升级保留配置、自动计划、指纹库和历史。
 
 ### 1.4.6 部分结果接纳与调度提速
 
@@ -106,7 +112,7 @@
 
 后台按账户任务串行执行。宿主在每次维护回调结束后约30秒再次调度。预算充足时一次回调连续完成评分、确认后的账户操作及后续账户检测；冷启动准备较慢时先保存挑战，下一次回调再发请求，避免准备挤占请求窗口。剩余预算不足时保留已完成的安全步骤，下次继续。首次开始、重试和复测仍受宿主调度间隔影响；倒计时结束表示可执行，仍需等待调度。关闭页面不影响执行；取消会通知执行器结束等待并关闭进行中的模型流，不再等完整请求超时。
 
-请求超时默认120秒，0表示不设置插件请求超时。执行器取配置超时与宿主剩余预算中的较短值；1.5.0将30秒维护回调中的请求窗口调整为最长约29秒。指纹库在请求前预加载，样本通过校验后尽量在同次回调评分；实际剩余预算不足时才显示「已获得有效样本，等待评分」，下一次优先继续评分，不重发请求。报告记录实际请求窗口、正文和流数据量。超时或截断时，部分正文通过原有样本校验后可继续评分；有效样本不足时按失败规则重试。连续两次完整请求窗口的宿主预算超时会停止重复请求；同次回调后续账户使用缩短窗口时仍保留普通重试预算。RS 3.29.1 的维护回调总预算为30秒，配置120秒不代表本次回调可以等待120秒。升级保留原配置；已提交任务继续使用原配置快照。真正的进程重启或存储失败导致请求结果不确定时，仍标记中断，需新建检测以避免重复请求。
+请求超时默认120秒，0表示不设置插件请求超时。执行器取配置超时与宿主剩余预算中的较短值；1.5.0将30秒维护回调中的请求窗口调整为最长约29秒。指纹库在请求前预加载，样本通过校验后尽量在同次回调评分；实际剩余预算不足时才显示「已获得有效样本，等待评分」，下一次优先继续评分，不重发请求。报告记录实际请求窗口、正文和流数据量。超时或截断时，部分正文通过原有样本校验后可继续评分；有效样本不足时按失败规则重试。连续两次完整请求窗口的宿主预算超时会停止重复请求；同次回调后续账户使用缩短窗口时仍保留普通重试预算。RS 3.29.7 的维护回调总预算为30秒，配置120秒不代表本次回调可以等待120秒。升级保留原配置；已提交任务继续使用原配置快照。真正的进程重启或存储失败导致请求结果不确定时，仍标记中断，需新建检测以避免重复请求。
 
 ### 配置保留与备份
 
@@ -136,7 +142,7 @@ ModelTrace概率是当前候选库内、均匀先验下的相对概率；库外�
 
 ## 开发与验证
 
-需要 Rust 1.97、Node >=24、pnpm、Python >=3.11、crane（下载固定运行时基础镜像）、cargo-zigbuild 和与RS同版的 `cpr-plugin`。Python开发依赖见 `requirements-dev.txt`。Rust与前端依赖分别通过锁文件固定。
+需要 Rust 1.99.1、Node >=24、pnpm、Python >=3.11、crane（下载固定运行时基础镜像）、cargo-zigbuild 和与RS同版的 `cpr-plugin`。Python开发依赖见 `requirements-dev.txt`。Rust与前端依赖分别通过锁文件固定。
 
 ```bash
 python3 -m venv .venv
@@ -150,7 +156,7 @@ cargo build --manifest-path backend/Cargo.toml --locked
 .venv/bin/python scripts/build_runtime.py
 cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu.2.36
 cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
-.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.5.0-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.5.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 基础镜像已缓存时可向 `build_runtime.py` 传 `--base-tar /path/python-base.tar`。脚本验证固定镜像配置、各镜像层和NumPy wheel哈希，不依赖Docker守护进程。`scripts/package.sh` 可串联构建和校验，需在已激活的开发环境运行。

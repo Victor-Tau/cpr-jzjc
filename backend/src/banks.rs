@@ -169,8 +169,13 @@ async fn fetch(
                 method: "GET".into(),
                 url,
                 headers: vec![
-                    ("User-Agent".into(), "modeltrace-health/1.2.0".into()),
-                    ("Accept".into(), "application/vnd.github+json".into()),
+                    (
+                        "User-Agent".into(),
+                        concat!("modeltrace-health/", env!("CARGO_PKG_VERSION"))
+                            .as_bytes()
+                            .to_vec(),
+                    ),
+                    ("Accept".into(), b"application/vnd.github+json".to_vec()),
                 ],
             },
             vec![],

@@ -1,13 +1,13 @@
 [package]
 name = "modeltrace-health"
-version = "1.5.0"
+version = "1.5.1"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.99.1"
 license = "MIT"
 publish = false
 
 [dependencies]
-gateway-plugin-sdk = { git = "https://github.com/zyycn/codex-proxy-rs.git", rev = "743a3aba70a4f78f27fb53d80a6e719599d2fe5e", features = ["io"] }
+gateway-plugin-sdk = { git = "https://github.com/zyycn/codex-proxy-rs.git", rev = "78bc57c5cf24b01a38e985cdd739bb4ae89ce11f", features = ["io"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["io-std", "io-util", "macros", "rt", "sync", "time", "process"] }

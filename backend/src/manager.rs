@@ -86,11 +86,7 @@ impl Manager {
             .iter()
             .enumerate()
             .filter(|(i, _)| index.is_none_or(|index| *i == index))
-            .map(|(_, (j, _))| {
-                let mut report = serde_json::to_value(j).unwrap();
-                report["usage"] = json!(j.usage());
-                (j.id.clone(), report)
-            });
+            .map(|(_, (j, _))| (j.id.clone(), serde_json::to_value(j).unwrap()));
         self.progress.publish(
             self.summaries(),
             self.bank_status(),
@@ -189,55 +185,7 @@ impl Manager {
         json!({"active":self.active_bank(),"previous":self.control.previous_bank.as_ref().and_then(|h|self.control.banks.iter().find(|b|&b.hash==h)),"builtin":banks::builtin(),"update":self.control.update,"engineCommit":banks::engine_commit()})
     }
     pub fn summaries(&self) -> Vec<Value> {
-        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state,"usage":j.usage()})).collect()
-    }
-    pub async fn refresh_costs(
-        &mut self,
-        host: &HostClient,
-        ids: &[String],
-        budget: std::time::Duration,
-    ) -> Result<(), PluginFault> {
-        let deadline = tokio::time::Instant::now() + budget;
-        for i in (0..self.jobs.len()).rev() {
-            if self.jobs[i].0.active() || !ids.contains(&self.jobs[i].0.id) {
-                continue;
-            }
-            let mut changed = false;
-            for a in 0..self.jobs[i].0.attempts.len() {
-                let attempt = &self.jobs[i].0.attempts[a];
-                if attempt.usage.as_ref().is_some_and(|usage| usage.complete)
-                    || now().saturating_sub(attempt.cost_checked_at) < 30_000
-                {
-                    continue;
-                }
-                let Some(request_id) = attempt.request_id.clone().filter(|id| !id.is_empty())
-                else {
-                    continue;
-                };
-                if tokio::time::Instant::now() + std::time::Duration::from_millis(200) >= deadline {
-                    break;
-                }
-                let lookup = host::detection_usage(host, &request_id, &self.jobs[i].0.account_id);
-                let result = tokio::time::timeout_at(
-                    deadline - std::time::Duration::from_millis(150),
-                    lookup,
-                )
-                .await;
-                let attempt = &mut self.jobs[i].0.attempts[a];
-                attempt.cost_checked_at = now();
-                if let Ok(Ok(usage)) = result {
-                    attempt.usage = Some(usage);
-                }
-                changed = true;
-            }
-            if changed {
-                self.save_job(host, i).await?;
-            }
-            if tokio::time::Instant::now() + std::time::Duration::from_millis(200) >= deadline {
-                break;
-            }
-        }
-        Ok(())
+        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state})).collect()
     }
     async fn prepare_score(
         &mut self,
@@ -908,18 +856,6 @@ impl Manager {
             .jobs
             .iter()
             .any(|(j, _)| j.actions_pending() || (j.active() && j.next_at <= now()));
-        if self.remaining() >= std::time::Duration::from_secs(2) {
-            let ids = self
-                .jobs
-                .iter()
-                .rev()
-                .filter(|(j, _)| !j.active() && !j.usage().complete)
-                .take(20)
-                .map(|(j, _)| j.id.clone())
-                .collect::<Vec<_>>();
-            self.refresh_costs(host, &ids, std::time::Duration::from_secs(1))
-                .await?;
-        }
         if visited.is_empty() && !busy && self.remaining() >= std::time::Duration::from_secs(6) {
             if self.remaining() >= std::time::Duration::from_secs(25)
                 && self.control.config.auto_check_updates
@@ -1145,8 +1081,6 @@ impl Manager {
                 at: now(),
                 error: Some("管理员取消检测".into()),
                 diagnostics: None,
-                usage: None,
-                cost_checked_at: 0,
             });
             self.jobs[i].0.pending_probe = false;
             self.jobs[i]
@@ -1196,8 +1130,6 @@ impl Manager {
             at: now(),
             error: error.clone(),
             diagnostics,
-            usage: None,
-            cost_checked_at: 0,
         });
         if let Some(numbers) = numbers {
             j.samples.push(Sample {

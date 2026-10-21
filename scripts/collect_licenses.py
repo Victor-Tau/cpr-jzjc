@@ -40,5 +40,5 @@ for node_root in (ROOT/'frontend/node_modules/.pnpm').iterdir():
         for candidate in candidates:
             if not candidate.is_dir() or not (candidate/'package.json').exists():continue
             p=json.loads((candidate/'package.json').read_text());add(f"{p.get('name')} {p.get('version')}",candidate)
-destination.write_text('\n'.join(chunks))
+destination.write_text('\n'.join(line.rstrip() for line in '\n'.join(chunks).split('\n')))
 print('Third-party notices:',destination.stat().st_size,'bytes')

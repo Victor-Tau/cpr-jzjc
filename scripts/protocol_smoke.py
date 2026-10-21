@@ -28,7 +28,8 @@ def model_events(*values, end=False):
     return {'events':len(events),'end':end},b'HME1'+struct.pack('>I',len(events))+b''.join(struct.pack('>I',len(e)) for e in events)+b''.join(events)
 
 class Host:
-    def __init__(self, binary=BINARY, state=None):
+    def __init__(self, binary=BINARY, state=None, protocol_version=5):
+        self.protocol_version=protocol_version
         self.send_lock=threading.Lock();self.timers=[]
         self.state={} if state is None else state
         self.enabled=True;self.streams={};self.executions=[];self.closes=0;self.fail_model=False;self.fail_download=False
@@ -36,7 +37,6 @@ class Host:
         self.disable_calls=0;self.fail_disable=False;self.sequence=1
         self.fail_put=None;self.model_read_delay=0;self.callback_response_delay=0
         self.additional_accounts=[]
-        self.usage_queries=[];self.usage_override=None
         self.groups=[{'id':'group-test','name':'测试组'},{'id':'group-degraded','name':'降智隔离组'}]
         self.memberships=['group-test'];self.move_calls=0;self.fail_move=False;self.ignore_move=False;self.updates=[]
         env=os.environ.copy();env['MODELTRACE_DEV_PYTHON']=str(ROOT/'.venv/bin/python')
@@ -46,7 +46,7 @@ class Host:
             command=['strace','-f','-o',os.devnull,'-e','trace=utimensat','-e','inject=utimensat:error=EPERM',*command]
         self.process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
         contributes={name:{'id':'personal.modeltrace-health.'+name,'version':version,'stages':[name]} for name,version in [('management',2),('maintenance',1)]}
-        self.send({'type':'hello','handshake':{'protocol_version':4,'artifact_sha256':'a'*64,'plugin_id':'personal.modeltrace-health','instance_id':'test','generation':1,'incarnation':'test-run','contributes':contributes}}, {})
+        self.send({'type':'hello','handshake':{'protocol_version':protocol_version,'artifact_sha256':'a'*64,'plugin_id':'personal.modeltrace-health','instance_id':'test','generation':1,'incarnation':'test-run','contributes':contributes}}, {})
         ready,_,_=self.receive();assert ready['type']=='ready',ready
 
     def send(self,meta,data=None,payload=b''):
@@ -123,14 +123,11 @@ class Host:
             return {},raw({'account_id':account_id,'provider_id':'openai','credential_revision':1,'name':'account','email':'user@example.com','upstream_user_id':'user','upstream_account_id':self.identity,'plan_type':'plus','authentication_kind':'oauth','enabled':self.enabled,'credential_state':'ready','has_refresh_token':True,'access_token_expires_at_ms':None,'next_refresh_at_ms':None})
         if method=='host.http.dispatch':
             uri=p['uri']
-            if uri.startswith('/api/admin/usage/records/detail?'):
-                from urllib.parse import urlparse, parse_qs
-                request_id=parse_qs(urlparse(uri).query)['id'][0];self.usage_queries.append(request_id)
-                index=int(request_id.removeprefix('request-'))-1
-                data={'id':request_id,'accountId':self.executions[index][0]['account_id'],'logicalOutcome':'succeeded',
-                      'costs':[{'currency':'USD','estimatedAmount':'0.0123456789012'}],
-                      'costCoverage':{'known':1,'partial':0,'unknown':0,'notBillable':0}}
-                if self.usage_override is not None:data.update(self.usage_override)
+            if uri.startswith('/api/admin/usage/'):
+                # Protocol-v4 binaries are used only by the upgrade test. The
+                # current plugin must never query platform usage records.
+                assert self.protocol_version == 4, 'removed usage lookup was called'
+                raise SimulatedFault('usage records unavailable')
             elif '/accounts/batch-update' in uri:
                 update=json.loads(body);assert update['accountIds']==['acct-test'];self.updates.append(update)
                 if 'enabled' in update:
@@ -178,12 +175,16 @@ class Host:
         if method=='host.model.stream_close':self.closes+=1;return {},b''
         if method=='host.http.do_stream':
             url=p['url']
+            if self.protocol_version >= 5:
+                assert all(isinstance(v,list) and all(isinstance(b,int) and 0<=b<=255 for b in v) for _,v in p['headers'])
             if self.fail_download:raise SimulatedFault('network unavailable')
             if url.endswith('/xqy2006/ModelTrace'):data=raw({'default_branch':'main'})
             elif '/commits/' in url:data=raw({'sha':self.sha})
             elif '/'+self.sha+'/data/unified_bank.json' in url:data=self.bank
             else:raise AssertionError(url)
-            return {'status':200,'headers':[],'stream':self.stream(data)},b''
+            response={'status':200,'headers':[],'stream':self.stream(data)}
+            if self.protocol_version >= 5:response.update(http_version='HTTP/1.1',trailers=[])
+            return response,b''
         if method=='host.http.stream_read':
             chunks=self.streams[p['stream']]
             if chunks:
@@ -542,59 +543,33 @@ class Integration(unittest.TestCase):
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1)
         self.assertEqual(len(self.host.executions),2) # Warmup + one slow probe; scoring never replays it.
-    def test_costs_include_failed_requests_and_keep_decimal_precision(self):
+    def test_detection_finishes_without_usage_queries(self):
         self.config(lowConfidencePercent=0,degradedPercent=100)
-        identity=self.submit();original=self.host.callback;failed=[]
-        def callback(method,p,body):
-            if method=='host.model.stream_read' and not failed:
-                failed.append(True)
-                return model_events({'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':'1,2,3'}]}]}},end=True)
-            return original(method,p,body)
-        self.host.callback=callback;self.host.tick(3)
+        identity=self.submit();self.host.tick(2)
         report=self.host.request('api/report?id='+identity)
-        self.assertEqual(report['status'],'completed');self.assertEqual(len(report['attempts']),2)
-        self.assertIsNotNone(report['attempts'][0]['error'])
-        self.assertEqual(report['usage'],{'complete':True,'costs':[{'currency':'USD','estimatedAmount':'0.0246913578024'}]})
-        self.host.request('api/costs',{'ids':[identity]})
-        self.assertEqual(self.host.usage_queries,['request-1','request-2'])
+        self.assertEqual(report['status'],'completed')
+        self.assertNotIn('usage',report)
+        self.assertNotIn('usage',self.host.request('api/jobs')['jobs'][0])
+        self.assertNotIn('usage',self.host.request('api/progress')['jobs'][0])
+        self.assertNotIn('usage',report['attempts'][0])
+        self.assertNotIn('costCheckedAt',report['attempts'][0])
+        self.host.request('api/costs',{'ids':[identity]},ok=False)
 
-    def test_pending_costs_sync_after_restart_without_reprobe(self):
+    def test_legacy_usage_fields_do_not_break_history_after_restart(self):
         self.config(lowConfidencePercent=0,degradedPercent=100)
-        self.host.usage_override={'logicalOutcome':'running'}
-        identity=self.submit();self.host.tick()
-        self.assertFalse(self.host.request('api/report?id='+identity)['usage']['complete'])
-        self.host.request('api/costs',{'ids':[identity]})
-        self.assertEqual(len(self.host.usage_queries),1) # Polls respect the 30s cooldown.
-        self.host.close();state=copy.deepcopy(self.host.state)
-        state[('jobs',identity)]['value']['attempts'][0]['costCheckedAt']=0
+        identity=self.submit();self.host.tick(2)
+        before=self.host.request('api/report?id='+identity)
+        state=copy.deepcopy(self.host.state);self.host.close()
+        attempt=state[('jobs',identity)]['value']['attempts'][0]
+        attempt.update(usage={'complete':False,'costs':[{'currency':'USD','estimatedAmount':'0.12'}]},costCheckedAt=123)
         self.host=Host(state=state);self.addCleanup(self.host.close)
-        # The platform keeps the old request even when the plugin restarts.
-        self.host.executions=[({'account_id':'acct-test'}, {})]
-        self.host.request('api/costs',{'ids':[identity]})
-        report=self.host.request('api/report?id='+identity)
-        self.assertTrue(report['usage']['complete']);self.assertEqual(len(self.host.executions),1)
-        self.assertEqual(report['usage']['costs'][0]['estimatedAmount'],'0.0123456789012')
-
-    def test_zero_and_multiple_currency_costs(self):
-        self.config(lowConfidencePercent=0,degradedPercent=100)
-        for i,costs in enumerate([[],[{'currency':'USD','estimatedAmount':'0'}],
-                [{'currency':'USD','estimatedAmount':'0.12'},{'currency':'CNY','estimatedAmount':'0.34'}]]):
-            self.host.usage_override={'costs':costs,'costCoverage':{'known':int(bool(costs)),'partial':0,'unknown':0,'notBillable':int(not costs)}}
-            identity=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':f'costs-{i}'})['submitted'][0]
-            self.host.tick();usage=self.host.request('api/report?id='+identity)['usage']
-            self.assertTrue(usage['complete']);self.assertEqual({c['currency']:c['estimatedAmount'] for c in usage['costs']},{c['currency']:c['estimatedAmount'] for c in costs})
-
-    def test_slow_cost_lookup_does_not_delay_detection_result(self):
-        self.config(lowConfidencePercent=0,degradedPercent=100)
-        identity=self.submit();original=self.host.callback
-        def callback(method,p,body):
-            if method=='host.http.dispatch' and p['uri'].startswith('/api/admin/usage/'):
-                self.host.callback_response_delay=3
-            return original(method,p,body)
-        self.host.callback=callback;started=time.monotonic();self.host.tick()
-        report=self.host.request('api/report?id='+identity)
-        self.assertEqual(report['status'],'completed');self.assertFalse(report['usage']['complete'])
-        self.assertLess(time.monotonic()-started,2.5)
+        restored=self.host.request('api/report?id='+identity)
+        # Use the upgrade check's tolerance for JSON float round trips.
+        from upgrade_smoke import equivalent
+        equivalent(before,restored)
+        self.host.tick()
+        self.assertEqual(len(self.host.executions),0)
+        self.assertNotIn('usage',self.host.request('api/bootstrap')['jobs'][0])
 
     def test_scoring_defers_only_when_saving_consumes_remaining_budget(self):
         self.config(lowConfidencePercent=0,degradedPercent=100)
@@ -819,5 +794,5 @@ class Integration(unittest.TestCase):
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,default=BINARY);parser.add_argument('--deny-timestamps',action='store_true',help='Use strace to deny utimensat and exercise restricted runtime extraction');parser.add_argument('--runtime-tmpdir',type=Path,help='Set TMPDIR for the plugin process to exercise runtime directory fallback');args,remaining=parser.parse_known_args();BINARY=args.binary;DENY_TIMESTAMPS=args.deny_timestamps;RUNTIME_TMPDIR=args.runtime_tmpdir
     # Host defaults are evaluated at definition time.
-    Host.__init__.__defaults__=(BINARY,None)
+    Host.__init__.__defaults__=(BINARY,None,5)
     unittest.main(argv=[sys.argv[0],*remaining])

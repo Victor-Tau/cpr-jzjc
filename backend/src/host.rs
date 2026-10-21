@@ -208,45 +208,6 @@ pub async fn accounts(host: &HostClient) -> Result<Vec<Account>, PluginFault> {
     Err(fault("账户数量超过100000"))
 }
 
-pub async fn detection_usage(
-    host: &HostClient,
-    request_id: &str,
-    account_id: &str,
-) -> Result<crate::domain::DetectionUsage, PluginFault> {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("id", request_id)
-        .finish();
-    let data = admin(
-        host,
-        "GET",
-        &format!("/api/admin/usage/records/detail?{query}"),
-        None,
-    )
-    .await?;
-    if data["id"].as_str() != Some(request_id)
-        || data["accountId"]
-            .as_str()
-            .is_some_and(|id| id != account_id)
-    {
-        return Err(fault("使用统计请求不匹配"));
-    }
-    let costs: Vec<crate::domain::DetectionCost> =
-        serde_json::from_value(data["costs"].clone()).map_err(|_| fault("使用统计费用格式无效"))?;
-    if costs.iter().any(|cost| {
-        cost.currency.is_empty()
-            || cost.currency.len() > 16
-            || crate::domain::add_amount("0", &cost.estimated_amount).is_none()
-    }) {
-        return Err(fault("使用统计费用无效"));
-    }
-    let coverage = &data["costCoverage"];
-    let complete = data["logicalOutcome"] != "running"
-        && coverage["unknown"].as_u64() == Some(0)
-        && coverage["partial"].as_u64() == Some(0)
-        && ((!costs.is_empty() && coverage["known"].as_u64().unwrap_or(0) > 0)
-            || coverage["notBillable"].as_u64().unwrap_or(0) > 0);
-    Ok(crate::domain::DetectionUsage { costs, complete })
-}
 pub async fn groups(host: &HostClient) -> Result<Vec<Group>, PluginFault> {
     let mut result = vec![];
     let mut seen = BTreeSet::new();
@@ -359,7 +320,7 @@ pub async fn execute(
     prompt: &str,
     parent_deadline: Option<tokio::time::Instant>,
     progress: std::sync::Arc<crate::progress::Progress>,
-) -> Result<ExecutionResult, ExecutionError> {
+) -> Result<ExecutionResult, Box<ExecutionError>> {
     let cfg = &job.config;
     let mut body = json!({"model":cfg.request_model,"input":[{"role":"user","content":[{"type":"input_text","text":prompt}]}],"stream":true,"store":false,"max_output_tokens":cfg.max_output_tokens});
     if let Some(t) = cfg.temperature {
@@ -543,7 +504,7 @@ pub async fn execute(
     } else {
         "upstream_failure"
     };
-    Err(ExecutionError {
+    Err(Box::new(ExecutionError {
         request_id,
         message: if timed_out && host_limited {
             format!(
@@ -567,7 +528,7 @@ pub async fn execute(
             partial: false,
             ..diagnostics
         },
-    })
+    }))
 }
 /// Keeps only complete SSE frames and separates visible output from reasoning.
 /// Terminal snapshots replace deltas so retransmitted text is not counted twice.
