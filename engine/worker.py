@@ -106,6 +106,9 @@ def handle(data):
         return fp.generate_challenges(1)
     if operation == "validate":
         return validate(load(data["path"]))
+    if operation == "prepare_score":
+        load(data["path"])
+        return None
     if operation == "sample":
         text = data["text"]
         if len(text.encode()) > 1024 * 1024:

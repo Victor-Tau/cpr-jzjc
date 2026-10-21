@@ -207,6 +207,46 @@ pub async fn accounts(host: &HostClient) -> Result<Vec<Account>, PluginFault> {
     }
     Err(fault("账户数量超过100000"))
 }
+
+pub async fn detection_usage(
+    host: &HostClient,
+    request_id: &str,
+    account_id: &str,
+) -> Result<crate::domain::DetectionUsage, PluginFault> {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("id", request_id)
+        .finish();
+    let data = admin(
+        host,
+        "GET",
+        &format!("/api/admin/usage/records/detail?{query}"),
+        None,
+    )
+    .await?;
+    if data["id"].as_str() != Some(request_id)
+        || data["accountId"]
+            .as_str()
+            .is_some_and(|id| id != account_id)
+    {
+        return Err(fault("使用统计请求不匹配"));
+    }
+    let costs: Vec<crate::domain::DetectionCost> =
+        serde_json::from_value(data["costs"].clone()).map_err(|_| fault("使用统计费用格式无效"))?;
+    if costs.iter().any(|cost| {
+        cost.currency.is_empty()
+            || cost.currency.len() > 16
+            || crate::domain::add_amount("0", &cost.estimated_amount).is_none()
+    }) {
+        return Err(fault("使用统计费用无效"));
+    }
+    let coverage = &data["costCoverage"];
+    let complete = data["logicalOutcome"] != "running"
+        && coverage["unknown"].as_u64() == Some(0)
+        && coverage["partial"].as_u64() == Some(0)
+        && ((!costs.is_empty() && coverage["known"].as_u64().unwrap_or(0) > 0)
+            || coverage["notBillable"].as_u64().unwrap_or(0) > 0);
+    Ok(crate::domain::DetectionUsage { costs, complete })
+}
 pub async fn groups(host: &HostClient) -> Result<Vec<Group>, PluginFault> {
     let mut result = vec![];
     let mut seen = BTreeSet::new();
@@ -429,7 +469,7 @@ pub async fn execute(
     };
     if let Some(s) = stream {
         let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(100),
             host.call("host.model.stream_close", json!({"stream":s}), vec![]),
         )
         .await;
@@ -507,10 +547,9 @@ pub async fn execute(
         request_id,
         message: if timed_out && host_limited {
             format!(
-                "宿主调用预算超时（本次请求窗口约{:.1}秒，正文{:.1}KB，推理{:.1}KB，流数据{:.1}KB）",
+                "宿主调用预算超时（本次请求窗口约{:.1}秒，正文{:.1}KB，流数据{:.1}KB）",
                 budget_ms.unwrap_or_default() as f64 / 1000.0,
                 response.output_bytes() as f64 / 1024.0,
-                response.reasoning_bytes() as f64 / 1024.0,
                 response.received_bytes as f64 / 1024.0
             )
         } else if permanent {

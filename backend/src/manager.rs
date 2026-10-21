@@ -56,6 +56,7 @@ pub struct Manager {
     deadline: Option<tokio::time::Instant>,
     request_window: std::time::Duration,
     last_job_source: Option<String>,
+    score_bank: Option<(String, std::path::PathBuf)>,
 }
 impl Manager {
     pub fn new(progress: Arc<Progress>) -> Self {
@@ -70,6 +71,7 @@ impl Manager {
             deadline: None,
             request_window: std::time::Duration::ZERO,
             last_job_source: None,
+            score_bank: None,
         }
     }
     pub async fn save(&mut self, host: &HostClient) -> Result<(), PluginFault> {
@@ -84,7 +86,11 @@ impl Manager {
             .iter()
             .enumerate()
             .filter(|(i, _)| index.is_none_or(|index| *i == index))
-            .map(|(_, (j, _))| (j.id.clone(), serde_json::to_value(j).unwrap()));
+            .map(|(_, (j, _))| {
+                let mut report = serde_json::to_value(j).unwrap();
+                report["usage"] = json!(j.usage());
+                (j.id.clone(), report)
+            });
         self.progress.publish(
             self.summaries(),
             self.bank_status(),
@@ -183,7 +189,75 @@ impl Manager {
         json!({"active":self.active_bank(),"previous":self.control.previous_bank.as_ref().and_then(|h|self.control.banks.iter().find(|b|&b.hash==h)),"builtin":banks::builtin(),"update":self.control.update,"engineCommit":banks::engine_commit()})
     }
     pub fn summaries(&self) -> Vec<Value> {
-        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state})).collect()
+        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state,"usage":j.usage()})).collect()
+    }
+    pub async fn refresh_costs(
+        &mut self,
+        host: &HostClient,
+        ids: &[String],
+        budget: std::time::Duration,
+    ) -> Result<(), PluginFault> {
+        let deadline = tokio::time::Instant::now() + budget;
+        for i in (0..self.jobs.len()).rev() {
+            if self.jobs[i].0.active() || !ids.contains(&self.jobs[i].0.id) {
+                continue;
+            }
+            let mut changed = false;
+            for a in 0..self.jobs[i].0.attempts.len() {
+                let attempt = &self.jobs[i].0.attempts[a];
+                if attempt.usage.as_ref().is_some_and(|usage| usage.complete)
+                    || now().saturating_sub(attempt.cost_checked_at) < 30_000
+                {
+                    continue;
+                }
+                let Some(request_id) = attempt.request_id.clone().filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                if tokio::time::Instant::now() + std::time::Duration::from_millis(200) >= deadline {
+                    break;
+                }
+                let lookup = host::detection_usage(host, &request_id, &self.jobs[i].0.account_id);
+                let result = tokio::time::timeout_at(
+                    deadline - std::time::Duration::from_millis(150),
+                    lookup,
+                )
+                .await;
+                let attempt = &mut self.jobs[i].0.attempts[a];
+                attempt.cost_checked_at = now();
+                if let Ok(Ok(usage)) = result {
+                    attempt.usage = Some(usage);
+                }
+                changed = true;
+            }
+            if changed {
+                self.save_job(host, i).await?;
+            }
+            if tokio::time::Instant::now() + std::time::Duration::from_millis(200) >= deadline {
+                break;
+            }
+        }
+        Ok(())
+    }
+    async fn prepare_score(
+        &mut self,
+        host: &HostClient,
+        i: usize,
+    ) -> Result<std::path::PathBuf, PluginFault> {
+        let bank = self.bank(self.jobs[i].0.bank_hash.as_ref().unwrap())?;
+        if let Some((hash, path)) = &self.score_bank
+            && hash == &bank.hash
+        {
+            return Ok(path.clone());
+        }
+        let bytes = banks::read(host, &bank).await?;
+        let path = self.engine.write_bank(&bank.hash, &bytes).await?;
+        let _: Value = self
+            .engine
+            .call(json!({"op":"prepare_score","path":path}))
+            .await?;
+        self.score_bank = Some((bank.hash, path.clone()));
+        Ok(path)
     }
     pub async fn set_config(
         &mut self,
@@ -708,12 +782,12 @@ impl Manager {
         host: &HostClient,
         budget: std::time::Duration,
     ) -> Result<(), PluginFault> {
-        // Give the network up to 28s of a 30s call. The worker is already warm
-        // before dispatch; validation and persistence retain 2s, scoring can wait.
-        self.request_window = budget.saturating_sub(std::time::Duration::from_secs(2));
+        // Up to 29s for requests; the warm worker can validate and score within
+        // the final second. Keep a separate margin for state persistence.
+        self.request_window = budget.saturating_sub(std::time::Duration::from_secs(1));
         self.deadline = Some(
             tokio::time::Instant::now()
-                + budget.saturating_sub(std::time::Duration::from_millis(1500)),
+                + budget.saturating_sub(std::time::Duration::from_millis(400)),
         );
         self.load(host).await?;
         self.prune(host).await?;
@@ -808,6 +882,7 @@ impl Manager {
                 // failed attempt in this callback, even with a zero retry delay.
                 .min_by_key(|(_, (j, _))| {
                     (
+                        j.samples.is_empty(),
                         self.last_job_source.as_deref() == Some(j.source.as_str()),
                         j.status != "running",
                     )
@@ -833,6 +908,18 @@ impl Manager {
             .jobs
             .iter()
             .any(|(j, _)| j.actions_pending() || (j.active() && j.next_at <= now()));
+        if self.remaining() >= std::time::Duration::from_secs(2) {
+            let ids = self
+                .jobs
+                .iter()
+                .rev()
+                .filter(|(j, _)| !j.active() && !j.usage().complete)
+                .take(20)
+                .map(|(j, _)| j.id.clone())
+                .collect::<Vec<_>>();
+            self.refresh_costs(host, &ids, std::time::Duration::from_secs(1))
+                .await?;
+        }
         if visited.is_empty() && !busy && self.remaining() >= std::time::Duration::from_secs(6) {
             if self.remaining() >= std::time::Duration::from_secs(25)
                 && self.control.config.auto_check_updates
@@ -870,7 +957,13 @@ impl Manager {
                 .deadline
                 .map(|d| d.saturating_duration_since(tokio::time::Instant::now()))
                 .unwrap_or_default();
-            if remaining < std::time::Duration::from_secs(6) {
+            let has_sample = !self.jobs[i].0.samples.is_empty();
+            let minimum = if has_sample {
+                std::time::Duration::from_millis(300)
+            } else {
+                std::time::Duration::from_secs(6)
+            };
+            if remaining < minimum {
                 if self.jobs[i].0.active() && !self.jobs[i].0.samples.is_empty() {
                     // The sample is already validated and persisted; only
                     // scoring waits for the next maintenance call. Report the
@@ -888,7 +981,7 @@ impl Manager {
                     self.request_window
                         .min(std::time::Duration::from_secs(job.config.timeout_seconds))
                 };
-                let available = remaining.saturating_sub(std::time::Duration::from_millis(500));
+                let available = remaining.saturating_sub(std::time::Duration::from_millis(600));
                 if available < desired.saturating_sub(std::time::Duration::from_millis(500)) {
                     // Cold extraction/preparation must not silently shorten every
                     // probe. Yield without sending or consuming a retry attempt.
@@ -922,8 +1015,8 @@ impl Manager {
             );
             return self.save_job(host, i).await;
         }
-        let ident = self.check_identity(host, i).await?;
         if self.jobs[i].0.status == "queued" {
+            let ident = self.check_identity(host, i).await?;
             let bank = self.active_bank();
             self.jobs[i].0.identity = Some(ident);
             self.jobs[i].0.bank_hash = Some(bank.hash);
@@ -937,13 +1030,23 @@ impl Manager {
         if self.jobs[i].0.samples.len() == 1 {
             self.progress
                 .phase(&self.jobs[i].0.id, "scoring", json!({}));
-            let bank = self.bank(self.jobs[i].0.bank_hash.as_ref().unwrap())?;
-            let bytes = banks::read(host, &bank).await?;
-            let path = self.engine.write_bank(&bank.hash, &bytes).await?;
-            let score: Score = self
-                .engine
-                .call(json!({"op":"score","path":path,"samples":self.jobs[i].0.samples}))
-                .await?;
+            let deadline = self.deadline.unwrap() - std::time::Duration::from_millis(150);
+            let scoring = async {
+                let path = self.prepare_score(host, i).await?;
+                self.engine
+                    .call::<_, Score>(
+                        json!({"op":"score","path":path,"samples":self.jobs[i].0.samples}),
+                    )
+                    .await
+            };
+            let score = match tokio::time::timeout_at(deadline, scoring).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    self.progress
+                        .phase(&self.jobs[i].0.id, "waiting_score", json!({}));
+                    return Ok(()); // The validated sample is already persisted.
+                }
+            };
             let j = &mut self.jobs[i].0;
             let verdict = j.classify(&score);
             j.rounds.push(Round {
@@ -992,7 +1095,7 @@ impl Manager {
                         j.next_at = now() + u64::from(j.config.retry_delay_seconds) * 1000;
                     }
                 }
-                "no_match" => j.finish("completed", "no_match", "未命中配置的降智规则", now()),
+                "no_match" => j.finish("completed", "no_match", "未降智", now()),
                 _ => j.finish(
                     "completed",
                     "inconclusive",
@@ -1010,10 +1113,12 @@ impl Manager {
             self.progress
                 .phase(&self.jobs[i].0.id, "preparing", json!({}));
             self.jobs[i].0.challenges = self.engine.call(json!({"op":"challenges"})).await?;
+            self.prepare_score(host, i).await?;
             self.save_job(host, i).await?;
             return Ok(());
         }
         let challenge = self.jobs[i].0.challenges[self.jobs[i].0.samples.len()].clone();
+        self.check_identity(host, i).await?;
         self.jobs[i].0.pending_probe = true;
         self.jobs[i].0.round_attempts += 1;
         self.jobs[i].0.message = format!("第{}轮，正在检测", self.jobs[i].0.rounds.len() + 1);
@@ -1021,7 +1126,7 @@ impl Manager {
         self.progress.phase(&self.jobs[i].0.id,"requesting",json!({"round":self.jobs[i].0.rounds.len()+1,"attempt":self.jobs[i].0.round_attempts,"expectedCount":challenge.expected_count}));
         let request_deadline = self
             .deadline
-            .map(|d| d - std::time::Duration::from_millis(500));
+            .map(|d| d - std::time::Duration::from_millis(600));
         let result = host::execute(
             host,
             &self.jobs[i].0,
@@ -1040,6 +1145,8 @@ impl Manager {
                 at: now(),
                 error: Some("管理员取消检测".into()),
                 diagnostics: None,
+                usage: None,
+                cost_checked_at: 0,
             });
             self.jobs[i].0.pending_probe = false;
             self.jobs[i]
@@ -1089,6 +1196,8 @@ impl Manager {
             at: now(),
             error: error.clone(),
             diagnostics,
+            usage: None,
+            cost_checked_at: 0,
         });
         if let Some(numbers) = numbers {
             j.samples.push(Sample {

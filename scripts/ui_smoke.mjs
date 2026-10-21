@@ -26,6 +26,7 @@ try {
       else if(input.path==='api/progress'){const revision='ui:'+f.revision,changed=new URLSearchParams(input.query).get('since')!==revision;result={revision,changed,jobs:changed?b.jobs:null,nextDue:b.nextDue,scheduleError:null}}
       else if(input.path==='api/jobs')result={jobs:b.jobs,banks:b.banks,nextDue:b.nextDue,scheduleError:null}
       else if(input.path==='api/report')result=f.report
+      else if(input.path==='api/costs')result={jobs:b.jobs}
       else if(input.path==='api/models')result={models:['gpt-6.1-sol','gpt-5.6-luna']}
       else if(input.path==='api/config'){const data=JSON.parse(input.body);b.config=data.config;b.configRevision++;result={config:data.config,revision:b.configRevision}}
       else if(input.path==='api/config/preview')result={config:JSON.parse(input.body).config}
@@ -45,6 +46,13 @@ try {
   })
   await page.goto('http://plugin.test/')
   await page.getByRole('textbox',{name:'搜索账户',exact:true}).waitFor()
+  await page.getByText('未降智',{exact:true}).first().waitFor()
+  await page.getByText('费用 $0.0123456789012',{exact:true}).first().waitFor()
+  assert.equal(await page.getByText('未命中降智规则',{exact:true}).count(),0)
+  const resultLine=page.locator('.result-line').filter({hasText:'未降智'}).first()
+  assert.equal(await resultLine.locator('.detection-cost').count(),1)
+  const aligned=await resultLine.evaluate(el=>{const a=el.firstElementChild.getBoundingClientRect(),b=el.lastElementChild.getBoundingClientRect();return Math.abs((a.top+a.bottom)-(b.top+b.bottom))<4 && b.left>a.right})
+  assert(aligned,'cost should appear to the right on the same result line')
   // The complete visual checkbox must fit inside its cell and remain clickable.
   const assertSelectionVisible = async () => {
     const rows = await page.locator('tbody tr').evaluateAll(rows => rows.map(row => {
@@ -182,7 +190,8 @@ try {
     f.revision++;document.dispatchEvent(new Event('visibilitychange'))
   })
   await page.locator('.live-progress').filter({hasText:'正在接收回答'}).waitFor({timeout:2500})
-  assert.match(await page.locator('.live-progress').innerText(),/正文 0\.5 KB · 推理 1\.0 KB/)
+  assert.match(await page.locator('.live-progress').innerText(),/正文 0\.5 KB/)
+  assert.doesNotMatch(await page.locator('.live-progress').innerText(),/推理/)
   assert.match(await nextRunText(),/下次检测 —/)
   assert.match(await page.locator('.detection-source').innerText(),/（手动）/)
   // A newer automatic result must not hide an active manual task from deduplication.
@@ -238,7 +247,7 @@ try {
   assert(await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/report').length)>reportsBeforeRetry)
   assert.match(await page.getByRole('status').filter({hasText:'宿主调用预算超时；等待重试'}).last().innerText(),/本轮已尝试 1\/5 次/)
   await page.getByText('请求记录（2）',{exact:true}).click()
-  await page.getByText('耗时 28.0 秒 · 正文 0.5 KB · 推理 1.0 KB · 流数据 2.0 KB',{exact:false}).waitFor()
+  await page.getByText('耗时 28.0 秒 · 正文 0.5 KB · 流数据 2.0 KB',{exact:false}).waitFor()
   await page.evaluate(()=>{
     const f=window.__fixture
     f.bootstrap.jobs[0].progress=f.report.progress={stage:'scoring',stageStartedAt:Date.now(),updatedAt:Date.now(),detail:{}}

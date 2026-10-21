@@ -31,6 +31,7 @@ fn registration() -> ManagementRegistration {
         ("GET", "api/jobs"),
         ("GET", "api/progress"),
         ("GET", "api/report"),
+        ("POST", "api/costs"),
         ("POST", "api/config"),
         ("POST", "api/config/preview"),
         ("POST", "api/submit"),
@@ -107,7 +108,7 @@ async fn handle(
             )
         }
         ("GET", "api/models") => {
-            let models:gateway_plugin_sdk::call::host::ModelListResult=host::meta(h,"host.models.list",json!({"client_key_id":query("keyId"),"protocol":"openai","client_version":"modeltrace-health/1.4.5"})).await?;
+            let models:gateway_plugin_sdk::call::host::ModelListResult=host::meta(h,"host.models.list",json!({"client_key_id":query("keyId"),"protocol":"openai","client_version":concat!("modeltrace-health/", env!("CARGO_PKG_VERSION"))})).await?;
             Ok(json!({"models":models.models}))
         }
         ("GET", "api/progress") => m
@@ -128,7 +129,18 @@ async fn handle(
             let mut value = serde_json::to_value(j).unwrap();
             value.as_object_mut().unwrap().remove("samples");
             value.as_object_mut().unwrap().remove("challenges");
+            value["usage"] = json!(j.usage());
             Ok(value)
+        }
+        ("POST", "api/costs") => {
+            let ids: Vec<String> = serde_json::from_value(body["ids"].clone())
+                .map_err(|_| host::fault("任务列表格式无效"))?;
+            if ids.len() > 20 {
+                return Err(host::fault("一次最多同步20个任务费用"));
+            }
+            m.refresh_costs(h, &ids, std::time::Duration::from_millis(1500))
+                .await?;
+            Ok(json!({"jobs":m.summaries()}))
         }
         ("POST", "api/config") => {
             let cfg = serde_json::from_value(body["config"].clone())
@@ -277,6 +289,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(error) => Err(error),
                         },
                         Err(_) => Err(host::fault("请求JSON格式无效")),
+                    }
+                } else if call.request.method == "POST" && call.request.path == "api/costs" {
+                    if let Ok(mut m) = manager.try_lock() {
+                        handle(&mut m, call).await
+                    } else {
+                        Ok(json!({"jobs":null}))
                     }
                 } else {
                     let mut m = manager.lock().await;

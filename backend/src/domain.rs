@@ -320,6 +320,65 @@ pub struct Attempt {
     pub error: Option<String>,
     #[serde(default)]
     pub diagnostics: Option<ProbeDiagnostics>,
+    #[serde(default)]
+    pub usage: Option<DetectionUsage>,
+    #[serde(default)]
+    pub cost_checked_at: u64,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectionUsage {
+    pub costs: Vec<DetectionCost>,
+    pub complete: bool,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectionCost {
+    pub currency: String,
+    pub estimated_amount: String,
+}
+// Add the platform's nonnegative decimal strings without floating point rounding.
+pub fn add_amount(a: &str, b: &str) -> Option<String> {
+    fn parts(value: &str) -> Option<(&str, &str)> {
+        let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+        (!whole.is_empty()
+            && whole.len() <= 30
+            && fraction.len() <= 30
+            && whole
+                .bytes()
+                .chain(fraction.bytes())
+                .all(|b| b.is_ascii_digit()))
+        .then_some((whole, fraction))
+    }
+    let ((aw, af), (bw, bf)) = (parts(a)?, parts(b)?);
+    let scale = af.len().max(bf.len());
+    let width = aw.len().max(bw.len());
+    let a = format!("{:0>width$}{:0<scale$}", aw, af);
+    let b = format!("{:0>width$}{:0<scale$}", bw, bf);
+    let mut carry = 0;
+    let mut digits = vec![];
+    for (a, b) in a.bytes().rev().zip(b.bytes().rev()) {
+        let total = a - b'0' + b - b'0' + carry;
+        digits.push(b'0' + total % 10);
+        carry = total / 10;
+    }
+    if carry != 0 {
+        digits.push(b'0' + carry);
+    }
+    digits.reverse();
+    let mut value = String::from_utf8(digits).ok()?;
+    if scale > 0 {
+        value.insert(value.len() - scale, '.');
+        value = value.trim_end_matches('0').trim_end_matches('.').into();
+    }
+    let value = value.trim_start_matches('0');
+    Some(if value.is_empty() {
+        "0".into()
+    } else if value.starts_with('.') {
+        format!("0{value}")
+    } else {
+        value.into()
+    })
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -373,6 +432,45 @@ fn no_action() -> String {
     "none".into()
 }
 impl Job {
+    pub fn usage(&self) -> DetectionUsage {
+        let mut costs = BTreeMap::<String, String>::new();
+        let mut complete = true;
+        let mut seen = std::collections::BTreeSet::new();
+        for attempt in &self.attempts {
+            let Some(id) = attempt.request_id.as_deref().filter(|id| !id.is_empty()) else {
+                complete = false;
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(usage) = &attempt.usage else {
+                complete = false;
+                continue;
+            };
+            complete &= usage.complete;
+            for cost in &usage.costs {
+                let amount = costs
+                    .entry(cost.currency.clone())
+                    .or_insert_with(|| "0".into());
+                if let Some(sum) = add_amount(amount, &cost.estimated_amount) {
+                    *amount = sum;
+                } else {
+                    complete = false;
+                }
+            }
+        }
+        DetectionUsage {
+            costs: costs
+                .into_iter()
+                .map(|(currency, estimated_amount)| DetectionCost {
+                    currency,
+                    estimated_amount,
+                })
+                .collect(),
+            complete,
+        }
+    }
     pub fn actions_pending(&self) -> bool {
         [&self.disable_state, &self.group_state]
             .iter()
@@ -454,6 +552,43 @@ impl Job {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    #[test]
+    fn platform_decimal_costs_keep_precision_and_unknowns() {
+        assert_eq!(add_amount("0.1", "0.2").as_deref(), Some("0.3"));
+        assert_eq!(
+            add_amount("999.999999999999999999", "0.000000000000000001").as_deref(),
+            Some("1000")
+        );
+        assert_eq!(add_amount("0", "0.00000001").as_deref(), Some("0.00000001"));
+        for invalid in ["", "NaN", "-1", "1e3", "0.1.2"] {
+            assert!(add_amount("0", invalid).is_none());
+        }
+        let mut j = job();
+        let attempt: Attempt =
+            serde_json::from_value(serde_json::json!({"requestId":"req","at":0,"error":null}))
+                .unwrap();
+        j.attempts.push(attempt.clone());
+        assert!(!j.usage().complete);
+        j.attempts[0].usage = Some(DetectionUsage {
+            complete: true,
+            costs: vec![DetectionCost {
+                currency: "USD".into(),
+                estimated_amount: "0.123456789012".into(),
+            }],
+        });
+        j.attempts.push(j.attempts[0].clone());
+        assert_eq!(j.usage().costs[0].estimated_amount, "0.123456789012");
+        j.attempts.push(Attempt {
+            request_id: Some("other".into()),
+            ..attempt
+        });
+        assert!(!j.usage().complete);
+        j.attempts[2].usage = Some(DetectionUsage {
+            complete: true,
+            costs: vec![],
+        });
+        assert!(j.usage().complete);
+    }
     pub fn job() -> Job {
         serde_json::from_value(serde_json::json!({"id":"j","accountId":"a","accountName":"a","source":"manual","status":"running","verdict":"","message":"","createdAt":0,"finishedAt":null,"nextAt":0,"config":Config::default(),"bankHash":null,"bankCommit":null,"engineCommit":"x","identity":null,"rounds":[],"samples":[],"challenges":[],"attempts":[],"roundAttempts":0,"consecutive":0,"lowRetriesUsed":0,"pendingProbe":false,"disableState":"none"})).unwrap()
     }

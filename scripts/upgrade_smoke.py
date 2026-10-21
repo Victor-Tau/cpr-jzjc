@@ -82,6 +82,8 @@ def main():
                     for attempt in previous:
                         # v1.4.1 adds optional timing diagnostics; old requests have none.
                         attempt.setdefault("diagnostics", None)
+                        attempt.setdefault("usage", None)
+                        attempt.setdefault("costCheckedAt", 0)
                         if attempt['diagnostics'] is not None:
                             attempt['diagnostics'].setdefault('partial', False)
                 equivalent(previous, restored[key])

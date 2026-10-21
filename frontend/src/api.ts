@@ -26,6 +26,7 @@ export const api = {
   models: (key: string) => request<{ models: string[] }>('GET', `api/models?keyId=${encodeURIComponent(key)}`),
   progress: (since?: string) => request<{ revision: string; changed: boolean; jobs: Job[] | null; nextDue: number | null; scheduleError: string | null }>('GET', `api/progress${since === undefined ? '' : `?since=${encodeURIComponent(since)}`}`),
   jobs: () => request<{ jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null }>('GET', 'api/jobs'),
+  costs: (ids: string[]) => request<{ jobs: Job[] | null }>('POST', 'api/costs', { ids }),
   report: (id: string) => request<Report>('GET', `api/report?id=${encodeURIComponent(id)}`),
   save: (config: Config, revision: number) => request<{ revision: number; config: Config }>('POST', 'api/config', { config, revision }),
   previewConfig: (config: unknown) => request<{ config: Config }>('POST', 'api/config/preview', { config }),
@@ -39,5 +40,5 @@ export const api = {
 export const date = (value: number | string | null | undefined) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
 export const percent = (n: number | null | undefined) => n == null ? '—' : `${(n * 100).toFixed(1)}%`
 export const active = (job?: Job) => !!job && ['queued', 'running'].includes(job.status)
-export const verdict = (s: string) => ({ degraded: '确认降智', suspected: '疑似降智', low_confidence: '低置信度复测', inconclusive: '证据不足', no_match: '未命中降智规则', queued: '排队中', running: '检测中', failed: '检测失败', interrupted: '已中断', cancelled: '已取消', completed: '已完成' }[s] || s || '尚未检测')
+export const verdict = (s: string) => ({ degraded: '确认降智', suspected: '疑似降智', low_confidence: '低置信度复测', inconclusive: '证据不足', no_match: '未降智', queued: '排队中', running: '检测中', failed: '检测失败', interrupted: '已中断', cancelled: '已取消', completed: '已完成' }[s] || s || '尚未检测')
 export const status = (a: Account) => !a.enabled ? '已停用' : ({ normal: '正常', error: '异常', quota_exhausted: '额度耗尽', rate_limited: '限流' }[a.status] || a.status)

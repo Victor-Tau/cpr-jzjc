@@ -90,7 +90,7 @@ function save() {
       <label>temperature（留空使用默认）<input :value="cfg.temperature ?? ''" type="number" min="0" max="2" step="0.1" @input="cfg.temperature = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"></label>
       <label>推理强度<ZSelect v-model="cfg.reasoningEffort" :options="['','none','minimal','low','medium','high','xhigh'].map(s => ({ value:s,label:s || '不传递' }))" aria-label="推理强度" /></label>
       <label>输出 token 上限<input type="number" min="512" max="16384" :value="cfg.maxOutputTokens" @input="number($event,'maxOutputTokens')"></label>
-      <label>单次请求超时（秒）<input type="number" min="0" step="1" :value="cfg.timeoutSeconds" @input="number($event,'timeoutSeconds')"><small>默认120秒，0表示不设请求超时。执行时会提前预留校验和保存时间；RS 3.29.1 的后台总预算为30秒，预算内收到的部分正文通过样本校验后可接纳；仅推理内容不能作为样本。</small></label>
+      <label>单次请求超时（秒）<input type="number" min="0" step="1" :value="cfg.timeoutSeconds" @input="number($event,'timeoutSeconds')"><small>默认120秒，0表示不设请求超时。执行时会提前预留校验和保存时间；RS 3.29.1 的后台总预算为30秒，请求最长约29秒；预算内收到的部分正文通过样本校验后可接纳；仅推理内容不能作为样本。</small></label>
     </section>
 
     <section class="panel"><div class="section-heading"><h3>降智与复测规则</h3><ZButton :disabled="busy" @click="useDefaults">使用 1.4 默认规则</ZButton></div><p>请求模型不在降级名单内，最高候选命中名单且概率达到阈值时，按配置轮数确认。</p>

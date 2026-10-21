@@ -36,6 +36,7 @@ class Host:
         self.disable_calls=0;self.fail_disable=False;self.sequence=1
         self.fail_put=None;self.model_read_delay=0;self.callback_response_delay=0
         self.additional_accounts=[]
+        self.usage_queries=[];self.usage_override=None
         self.groups=[{'id':'group-test','name':'测试组'},{'id':'group-degraded','name':'降智隔离组'}]
         self.memberships=['group-test'];self.move_calls=0;self.fail_move=False;self.ignore_move=False;self.updates=[]
         env=os.environ.copy();env['MODELTRACE_DEV_PYTHON']=str(ROOT/'.venv/bin/python')
@@ -122,7 +123,15 @@ class Host:
             return {},raw({'account_id':account_id,'provider_id':'openai','credential_revision':1,'name':'account','email':'user@example.com','upstream_user_id':'user','upstream_account_id':self.identity,'plan_type':'plus','authentication_kind':'oauth','enabled':self.enabled,'credential_state':'ready','has_refresh_token':True,'access_token_expires_at_ms':None,'next_refresh_at_ms':None})
         if method=='host.http.dispatch':
             uri=p['uri']
-            if '/accounts/batch-update' in uri:
+            if uri.startswith('/api/admin/usage/records/detail?'):
+                from urllib.parse import urlparse, parse_qs
+                request_id=parse_qs(urlparse(uri).query)['id'][0];self.usage_queries.append(request_id)
+                index=int(request_id.removeprefix('request-'))-1
+                data={'id':request_id,'accountId':self.executions[index][0]['account_id'],'logicalOutcome':'succeeded',
+                      'costs':[{'currency':'USD','estimatedAmount':'0.0123456789012'}],
+                      'costCoverage':{'known':1,'partial':0,'unknown':0,'notBillable':0}}
+                if self.usage_override is not None:data.update(self.usage_override)
+            elif '/accounts/batch-update' in uri:
                 update=json.loads(body);assert update['accountIds']==['acct-test'];self.updates.append(update)
                 if 'enabled' in update:
                     assert set(update)=={'accountIds','enabled'} and update['enabled'] is False
@@ -339,7 +348,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),2);self.assertIn('连续两次',report['message'])
         for attempt in report['attempts']:
             self.assertEqual(attempt['diagnostics']['kind'],'host_budget_timeout');self.assertGreater(attempt['diagnostics']['receivedBytes'],0)
-            self.assertGreater(attempt['diagnostics']['budgetMs'],7400);self.assertLessEqual(attempt['diagnostics']['budgetMs'],8000)
+            self.assertGreater(attempt['diagnostics']['budgetMs'],8400);self.assertLessEqual(attempt['diagnostics']['budgetMs'],9000)
         self.host.tick();self.assertEqual(len(self.host.executions),2)
 
     def test_configured_timeout_keeps_five_attempt_limit(self):
@@ -378,8 +387,8 @@ class Integration(unittest.TestCase):
             return original(method,p,body)
         self.host.callback=callback;self.host.tick(budget_ms=10000)
         report=self.host.request('api/report?id='+identity)
-        self.assertEqual(report['progress']['stage'],'waiting_score')
-        self.assertEqual(len(self.host.state[('jobs',identity)]['value']['samples'][0]['numbers']),240)
+        self.assertEqual(report['status'],'completed')
+        self.assertEqual(len(report['rounds']),1)
         self.assertTrue(report['attempts'][0]['diagnostics']['partial']);self.assertIsNone(report['attempts'][0]['error'])
         self.host.model_read_delay=0;self.host.tick()
         self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed')
@@ -514,24 +523,95 @@ class Integration(unittest.TestCase):
             self.host.tick();report=self.host.request('api/report?id='+identity)
         self.assertEqual(len(self.host.executions),2) # Warmup + one slow probe; scoring never replays it.
         self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1);self.assertEqual(self.host.closes,0)
-    def test_deferred_scoring_reports_waiting_score(self):
-        # A probe whose answer lands in the last seconds of the maintenance
-        # budget keeps its validated sample; only scoring resumes on the next
-        # call, so progress must say so instead of staying on "validating".
+    def test_late_response_scores_in_same_callback(self):
+        # A response at 28.7s must use the extended request window and score
+        # immediately, without waiting for another maintenance callback.
         self.config(lowConfidencePercent=0,degradedPercent=100)
         self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'waiting-score-warmup'});self.host.tick()
         for _ in range(4):
             if all(j['status'] not in ('queued','running') for j in self.host.request('api/jobs')['jobs']):break
             self.host.tick()
-        identity=self.submit();self.host.model_read_delay=23
+        identity=self.submit();self.host.model_read_delay=28.7
         self.host.tick()
         report=self.host.request('api/report?id='+identity)
-        self.assertEqual(report['status'],'running');self.assertEqual(report['progress']['stage'],'waiting_score')
-        self.assertEqual(len(report['attempts']),1);self.assertIsNone(report['attempts'][0]['error']);self.assertEqual(len(report['rounds']),0)
+        self.assertEqual(report['status'],'completed')
+        self.assertEqual(len(report['attempts']),1);self.assertIsNone(report['attempts'][0]['error']);self.assertEqual(len(report['rounds']),1)
+        self.assertGreater(report['attempts'][0]['diagnostics']['budgetMs'],28500)
+        self.assertLessEqual(report['attempts'][0]['diagnostics']['budgetMs'],29000)
         self.host.model_read_delay=0;self.host.tick()
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1)
         self.assertEqual(len(self.host.executions),2) # Warmup + one slow probe; scoring never replays it.
+    def test_costs_include_failed_requests_and_keep_decimal_precision(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();original=self.host.callback;failed=[]
+        def callback(method,p,body):
+            if method=='host.model.stream_read' and not failed:
+                failed.append(True)
+                return model_events({'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':'1,2,3'}]}]}},end=True)
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick(3)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'completed');self.assertEqual(len(report['attempts']),2)
+        self.assertIsNotNone(report['attempts'][0]['error'])
+        self.assertEqual(report['usage'],{'complete':True,'costs':[{'currency':'USD','estimatedAmount':'0.0246913578024'}]})
+        self.host.request('api/costs',{'ids':[identity]})
+        self.assertEqual(self.host.usage_queries,['request-1','request-2'])
+
+    def test_pending_costs_sync_after_restart_without_reprobe(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        self.host.usage_override={'logicalOutcome':'running'}
+        identity=self.submit();self.host.tick()
+        self.assertFalse(self.host.request('api/report?id='+identity)['usage']['complete'])
+        self.host.request('api/costs',{'ids':[identity]})
+        self.assertEqual(len(self.host.usage_queries),1) # Polls respect the 30s cooldown.
+        self.host.close();state=copy.deepcopy(self.host.state)
+        state[('jobs',identity)]['value']['attempts'][0]['costCheckedAt']=0
+        self.host=Host(state=state);self.addCleanup(self.host.close)
+        # The platform keeps the old request even when the plugin restarts.
+        self.host.executions=[({'account_id':'acct-test'}, {})]
+        self.host.request('api/costs',{'ids':[identity]})
+        report=self.host.request('api/report?id='+identity)
+        self.assertTrue(report['usage']['complete']);self.assertEqual(len(self.host.executions),1)
+        self.assertEqual(report['usage']['costs'][0]['estimatedAmount'],'0.0123456789012')
+
+    def test_zero_and_multiple_currency_costs(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        for i,costs in enumerate([[],[{'currency':'USD','estimatedAmount':'0'}],
+                [{'currency':'USD','estimatedAmount':'0.12'},{'currency':'CNY','estimatedAmount':'0.34'}]]):
+            self.host.usage_override={'costs':costs,'costCoverage':{'known':int(bool(costs)),'partial':0,'unknown':0,'notBillable':int(not costs)}}
+            identity=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':f'costs-{i}'})['submitted'][0]
+            self.host.tick();usage=self.host.request('api/report?id='+identity)['usage']
+            self.assertTrue(usage['complete']);self.assertEqual({c['currency']:c['estimatedAmount'] for c in usage['costs']},{c['currency']:c['estimatedAmount'] for c in costs})
+
+    def test_slow_cost_lookup_does_not_delay_detection_result(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();original=self.host.callback
+        def callback(method,p,body):
+            if method=='host.http.dispatch' and p['uri'].startswith('/api/admin/usage/'):
+                self.host.callback_response_delay=3
+            return original(method,p,body)
+        self.host.callback=callback;started=time.monotonic();self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'completed');self.assertFalse(report['usage']['complete'])
+        self.assertLess(time.monotonic()-started,2.5)
+
+    def test_scoring_defers_only_when_saving_consumes_remaining_budget(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'defer-warmup'});self.host.tick()
+        identity=self.submit();original=self.host.callback;delayed=[]
+        def callback(method,p,body):
+            if method=='host.state.put' and p['namespace']=='jobs' and p['key']==identity and p['value']['samples'] and not delayed:
+                delayed.append(True);self.host.callback_response_delay=0.7
+            return original(method,p,body)
+        self.host.callback=callback;self.host.model_read_delay=8.7;self.host.tick(budget_ms=10000)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'running');self.assertEqual(report['progress']['stage'],'waiting_score')
+        self.assertEqual(len(self.host.state[('jobs',identity)]['value']['samples']),1)
+        self.host.model_read_delay=0;self.host.tick()
+        self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed')
+        self.assertEqual(len(self.host.executions),2)
+
     def test_unlimited_and_large_timeout_complete_without_overflow(self):
         for seconds in [0,3600,2**40,2**64-1]:
             with self.subTest(seconds=seconds):
