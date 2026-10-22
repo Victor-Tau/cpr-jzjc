@@ -32,6 +32,7 @@ export const api = {
   submit: (accountIds: string[], requestId: string) => request('POST', 'api/submit', { accountIds, requestId }),
   cancel: (id?: string, source?: 'manual' | 'schedule') => request('POST', 'api/cancel', { id, source }),
   delete: (id: string) => request('POST', 'api/delete', { id }),
+  deleteMany: (ids: string[]) => request<{ deleted: number; skipped: number }>('POST', 'api/delete', { ids }),
   retryDisable: (id: string) => request('POST', 'api/retry-disable', { id }),
   retryGroup: (id: string) => request('POST', 'api/retry-group', { id }),
   bank: (operation: 'check' | 'apply' | 'rollback' | 'builtin') => request<Banks>('POST', `api/banks/${operation}`, {}),

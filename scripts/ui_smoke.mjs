@@ -29,6 +29,7 @@ try {
       else if(input.path==='api/models')result={models:['gpt-6.1-sol','gpt-5.6-luna']}
       else if(input.path==='api/config'){const data=JSON.parse(input.body);b.config=data.config;b.configRevision++;result={config:data.config,revision:b.configRevision}}
       else if(input.path==='api/config/preview')result={config:JSON.parse(input.body).config}
+      else if(input.path==='api/delete'){const data=JSON.parse(input.body),ids=data.ids||[data.id];let skipped=0;b.jobs=b.jobs.filter(j=>{if(!ids.includes(j.id))return true;if(['queued','running'].includes(j.status)){skipped++;return true}return false});result={deleted:ids.length-skipped,skipped}}
       else if(input.path==='api/retry-group'){f.report.groupState=b.jobs[0].groupState='moved';f.report.groupError=null;f.report.message=b.jobs[0].message='已确认降智；已关闭账户调度；已移入指定分组';f.revision++}
       else if(input.path==='api/submit')result={submitted:['ui-test']}
       else if(input.path==='api/banks/check'){b.banks.update.available={...b.banks.active,commit:'b'.repeat(40),hash:'c'.repeat(64)};b.banks.update.added=['new-model'];b.banks.update.checkedAt=Date.now();result=b.banks}
@@ -85,6 +86,12 @@ try {
   await page.getByText('匹配 11 个',{exact:false}).waitFor()
   await page.getByRole('button',{name:'参数配置',exact:true}).click()
   assert.equal(await page.getByRole('button',{name:'保存全部参数',exact:true}).count(),1)
+  // Scheduled subscription filtering is multi-select and keeps both chosen plans.
+  await page.getByLabel('定时订阅筛选',{exact:true}).click()
+  await page.getByRole('option',{name:'plus',exact:true}).click()
+  await page.getByRole('option',{name:'pro',exact:true}).click()
+  await page.keyboard.press('Escape')
+  await page.getByRole('listbox').waitFor({state:'hidden'})
   for(const [label,value] of [['低置信度复测阈值（%）','20'],['降智判定阈值（%）','90'],['连续确认轮数','1'],['低置信度额外复测次数','1'],['复测与失败重试间隔（秒）','10'],['历史保留（天）','30']]) {
     assert.equal(await page.getByRole('spinbutton',{name:new RegExp('^'+label.replace(/[()%]/g,'\\$&'))}).inputValue(),value)
   }
@@ -101,6 +108,8 @@ try {
   await page.getByText('参数已保存。',{exact:true}).waitFor()
   assert.equal(await page.evaluate(()=>window.__fixture.bootstrap.config.requestModel),'custom-request-model')
   assert.equal(await page.evaluate(()=>window.__fixture.bootstrap.config.timeoutSeconds),3600)
+  assert.deepEqual(await page.evaluate(()=>window.__fixture.bootstrap.config.schedule.filter.plans),['plus','pro'])
+  assert.equal(await page.evaluate(()=>window.__fixture.bootstrap.config.schedule.filter.plan),'')
   await timeout.fill('0')
   await page.getByRole('button',{name:'保存全部参数',exact:true}).click()
   await page.waitForFunction(()=>window.__fixture.bootstrap.config.timeoutSeconds===0)
@@ -285,7 +294,31 @@ try {
   await page.getByRole('button',{name:'重试移入分组',exact:true}).click()
   await page.getByRole('status').filter({hasText:'已移入指定分组'}).last().waitFor()
   assert.equal(await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/submit').length),probes)
-  await page.keyboard.press('Escape')
+  await page.getByRole('dialog',{name:'检测报告',exact:true}).getByRole('button',{name:'关闭',exact:true}).click()
+  await page.getByRole('dialog',{name:'检测报告',exact:true}).waitFor({state:'hidden'})
+  // History supports the same select-all pattern and deletes a batch in one request.
+  await page.evaluate(()=>{
+    const f=window.__fixture,base={...f.bootstrap.jobs[0]}
+    delete base.progress
+    f.bootstrap.jobs.push(
+      {...base,id:'history-two',source:'schedule',status:'completed',createdAt:Date.now()-1000,finishedAt:Date.now()-500,groupState:'none',disableState:'none'},
+      {...base,id:'history-three',source:'manual',status:'completed',createdAt:Date.now()-2000,finishedAt:Date.now()-1500,groupState:'none',disableState:'none'},
+      {...base,id:'history-running',source:'manual',status:'running',verdict:'',createdAt:Date.now(),finishedAt:null,groupState:'none',disableState:'none'},
+    )
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.getByRole('button',{name:'检测历史',exact:true}).click()
+  await page.getByText('已选 0 条 · 匹配 4 条',{exact:false}).waitFor()
+  assert.equal(await page.locator('tbody input[type=checkbox]:disabled').count(),1)
+  await page.getByLabel('全选筛选结果（3）',{exact:true}).locator('..').click()
+  await page.screenshot({path:resolve(root,'.cache/history.png'),fullPage:true})
+  await page.getByRole('button',{name:'删除所选（3）',exact:true}).click()
+  await page.getByRole('dialog',{name:'删除检测历史',exact:true}).waitFor()
+  await page.getByRole('button',{name:'删除 3 条',exact:true}).click()
+  await page.getByText('已删除 3 条检测记录。',{exact:true}).waitFor()
+  assert.equal(await page.evaluate(()=>window.__fixture.bootstrap.jobs.length),1)
+  assert.equal(await page.evaluate(()=>JSON.parse(window.__calls.filter(c=>c.path==='api/delete').at(-1).body).ids.length),3)
+  await page.getByText('已选 0 条 · 匹配 1 条',{exact:false}).waitFor()
   await page.evaluate(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'))})
   const paused=await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/progress').length)
   await page.waitForTimeout(1200)
@@ -308,5 +341,5 @@ try {
   await assertNoUsage()
   assert.deepEqual(errors,[])
   for(const path of ['api/submit','api/models','api/config','api/banks/check','api/banks/apply','api/banks/rollback','api/report','api/config/preview','api/retry-group'])assert(paths.includes(path),path)
-  console.log(JSON.stringify({ui:'passed',checks:['usage display and polling removed','unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
+  console.log(JSON.stringify({ui:'passed',checks:['usage display and polling removed','unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','history select all and batch delete','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','scheduled subscription multi-select','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
 } finally {await browser.close()}

@@ -8,11 +8,18 @@
 
 在宿主「插件管理 → 安装插件 → 上传包」上传：
 
-`dist/personal.modeltrace-health-1.5.1-x86_64-unknown-linux-gnu.tar.gz`
+`dist/personal.modeltrace-health-1.6.0-x86_64-unknown-linux-gnu.tar.gz`
 
 启用后打开「账号降智检测」，进入「参数配置」选择已有计量 Key，保存后即可单号或批量检测。检测请求由宿主按指定账户 ID 执行，使用该账户绑定的代理并计入所选 Key。Key 的账户分组和模型权限仍由宿主校验。页面仅接收 Key ID 和名称。
 
 运行时首次检测会解出约91MB文件，目标目录需可写、可执行并有足够空间。自动跳过 `noexec` 临时目录，解包失败时清理残留并尝试 `/var/tmp`，兼容 Docker 中仅64MB且禁止执行的 `/tmp`。可用宿主进程的 `MODELTRACE_RUNTIME_DIR` 指定首选目录，或用 `TMPDIR` 修改系统临时目录。解包不恢复不必要的文件时间戳；异常会显示具体条目和系统错误。
+
+### 1.6.0 检测历史批量删除与定时订阅多选
+
+- 检测历史新增选择列与「全选筛选结果」，可跨页保留选择并一次删除所选记录；正在检测或等待关闭调度、移组的记录不可选择。
+- 批量删除只移除历史与报告，不恢复已停用账户，也不改变账户分组或调度状态；单条删除保持不变。
+- 自动定时检测的订阅类型改为多选，可同时匹配多个订阅；留空表示全部订阅，旧配置中的单一订阅值会自动带入多选。
+- 更新现有实例保留配置、自动计划、指纹库、检测历史和提交去重。
 
 ### 1.5.1 宿主与插件包更新
 
@@ -80,7 +87,7 @@
 
 - **账户检测**：列出全部账户；按订阅、状态和分组组合筛选，搜索名称、邮箱或账户ID。支持10/20/50/100条分页、勾选当前页、跨页批量检测。首版检测OpenAI账户；其他提供方会显示不支持。
 - **参数配置**：一套全局配置，手动和定时共用。请求模型支持目录选择与手动输入；支持计量Key、temperature、推理强度、输出上限、超时、降级名单、别名和阈值配置。宿主不接受的请求参数会终止本次任务并显示错误类别。
-- **检测历史**：查看每轮全部候选概率、家族概率、触发原因、请求ID、配置快照和指纹库版本。删除历史不会恢复已停用账户。
+- **检测历史**：查看每轮全部候选概率、家族概率、触发原因、请求ID、配置快照和指纹库版本。可全选当前筛选结果批量删除，也可逐条删除；删除历史不会恢复已停用账户。
 
 默认配置：
 
@@ -126,7 +133,7 @@
 
 支持固定间隔（分钟）和指定IANA时区的每日时刻。每日时刻遇到夏令时缺失分钟时，在之后首个有效分钟执行；重复时刻当日只运行一次。
 
-范围可保存订阅、状态、分组和关键词筛选条件，运行时重新匹配以纳入新账户；也可保存固定账户ID。定时只检测启用的OpenAI账户，仅跳过已有活动自动任务的账户；活动手动任务不影响定时提交。手动检测不改变定时计划的下次执行时间。错过的时间点合并一次，不补跑全部历史时间点。每次最多提交500个账户，超出会在配置页显示错误，需缩小范围。
+范围可保存多个订阅类型、状态、分组和关键词筛选条件，运行时重新匹配以纳入新账户；订阅类型留空表示全部；也可保存固定账户ID。定时只检测启用的OpenAI账户，仅跳过已有活动自动任务的账户；活动手动任务不影响定时提交。手动检测不改变定时计划的下次执行时间。错过的时间点合并一次，不补跑全部历史时间点。每次最多提交500个账户，超出会在配置页显示错误，需缩小范围。
 
 ### 指纹库在线更新
 
@@ -156,7 +163,7 @@ cargo build --manifest-path backend/Cargo.toml --locked
 .venv/bin/python scripts/build_runtime.py
 cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu.2.36
 cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
-.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.5.1-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.6.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 基础镜像已缓存时可向 `build_runtime.py` 传 `--base-tar /path/python-base.tar`。脚本验证固定镜像配置、各镜像层和NumPy wheel哈希，不依赖Docker守护进程。`scripts/package.sh` 可串联构建和校验，需在已激活的开发环境运行。
@@ -202,7 +209,7 @@ PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin node scripts/ui_smoke.mjs
 | POST | `api/submit` | `{accountIds, requestId}` 幂等提交 |
 | GET | `api/jobs` / `api/report?id=...` | 任务列表与报告 |
 | GET | `api/progress?since=...` | 轻量进度快照；版本未变化时返回 `changed=false,jobs=null` |
-| POST | `api/cancel` / `api/delete` / `api/retry-disable` / `api/retry-group` | `{id}` 取消、删除历史、重试关闭调度或移组；取消支持可选 `source=manual/schedule` 分别停止队列；省略id与source时停止全部队列 |
+| POST | `api/cancel` / `api/delete` / `api/retry-disable` / `api/retry-group` | `{id}` 取消、删除历史、重试关闭调度或移组；`api/delete` 也接受 `{ids}` 批量删除并返回 `deleted`、`skipped`；取消支持可选 `source=manual/schedule` 分别停止队列；省略id与source时停止全部队列 |
 | POST | `api/banks/check` / `apply` / `rollback` / `builtin` | 检查、应用、回退与恢复内置库 |
 
 许可证为MIT。第三方原始声明见 `legal/NOTICE.md`、`legal/THIRD_PARTY.txt` 与 `vendor/modeltrace/LICENSE`。

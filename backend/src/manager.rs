@@ -413,6 +413,35 @@ impl Manager {
         self.publish(None);
         Ok(())
     }
+    pub async fn delete_jobs(
+        &mut self,
+        host: &HostClient,
+        ids: &[String],
+    ) -> Result<Value, PluginFault> {
+        let wanted: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut deleted = vec![];
+        let mut skipped = 0;
+        for (j, _) in &self.jobs {
+            if wanted.contains(j.id.as_str()) {
+                if j.active() || j.actions_pending() {
+                    skipped += 1;
+                } else {
+                    deleted.push(j.id.clone());
+                }
+            }
+        }
+        if deleted.is_empty() {
+            return Ok(json!({"deleted":0,"skipped":skipped}));
+        }
+        self.control.job_ids.retain(|id| !deleted.contains(id));
+        self.save(host).await?;
+        for id in &deleted {
+            host::state_delete(host, "jobs", id).await?;
+        }
+        self.jobs.retain(|(j, _)| !deleted.contains(&j.id));
+        self.publish(None);
+        Ok(json!({"deleted":deleted.len(),"skipped":skipped}))
+    }
     async fn prune(&mut self, host: &HostClient) -> Result<(), PluginFault> {
         let cutoff = now().saturating_sub(u64::from(self.control.config.retention_days) * 86400000);
         let mut bytes: usize = self

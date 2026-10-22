@@ -170,14 +170,20 @@ async fn handle(
             Ok(json!({"ok":true}))
         }
         ("POST", "api/delete") => {
-            m.delete_job(
-                h,
-                body["id"]
-                    .as_str()
-                    .ok_or_else(|| host::fault("缺少任务ID"))?,
-            )
-            .await?;
-            Ok(json!({"ok":true}))
+            if body.get("ids").is_some_and(|ids| !ids.is_null()) {
+                let ids: Vec<String> = serde_json::from_value(body["ids"].clone())
+                    .map_err(|_| host::fault("任务ID列表格式错误"))?;
+                Ok(m.delete_jobs(h, &ids).await?)
+            } else {
+                m.delete_job(
+                    h,
+                    body["id"]
+                        .as_str()
+                        .ok_or_else(|| host::fault("缺少任务ID"))?,
+                )
+                .await?;
+                Ok(json!({"ok":true,"deleted":1,"skipped":0}))
+            }
         }
         ("POST", "api/retry-disable") => {
             let id = body["id"].as_str().unwrap_or("");

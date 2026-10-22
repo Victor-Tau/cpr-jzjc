@@ -492,6 +492,25 @@ class Integration(unittest.TestCase):
         _,payload=self.host.call('management.register',stage='registration');registration=json.loads(payload);self.assertIn('api/report',[r['path'] for r in registration['routes']])
         self.assertEqual(self.host.request('api/accounts')['accounts'][0]['groups'][0]['id'],'group-test')
         self.assertIn('gpt-6.1-sol',self.host.request('api/models?keyId=key-test')['models'])
+    def test_batch_delete_history_skips_active_and_keeps_legacy_id(self):
+        self.host.additional_accounts=[{'id':'acct-two','name':'second-account','provider':'openai','enabled':True,'status':'normal','planType':'plus','groups':[]}]
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        first=self.submit()
+        second=self.host.request('api/submit',{'accountIds':['acct-two'],'requestId':'submit-two'})['submitted'][0]
+        self.host.tick(2)
+        for identity in [first,second]:
+            self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed')
+        active=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'submit-active'})['submitted'][0]
+        result=self.host.request('api/delete',{'ids':[first,second,active,first]})
+        self.assertEqual(result,{'deleted':2,'skipped':1})
+        self.assertEqual([j['id'] for j in self.host.request('api/jobs')['jobs']],[active])
+        self.assertNotIn(('jobs',first),self.host.state);self.assertNotIn(('jobs',second),self.host.state)
+        self.host.request('api/report?id='+first,ok=False)
+        self.host.request('api/delete',{'id':active},ok=False)
+        self.host.request('api/cancel',{'id':active})
+        self.assertEqual(self.host.request('api/delete',{'id':active}),{'ok':True,'deleted':1,'skipped':0})
+        self.assertNotIn(('jobs',active),self.host.state)
+        self.assertNotIn(active,self.host.request('api/bootstrap')['jobs'])
     def test_binding_idempotency_and_completed_scoring(self):
         self.config(degradedModels=['gpt-5.6-luna'],lowConfidencePercent=0,degradedPercent=100)
         identity=self.submit();self.assertEqual(identity,self.submit());self.host.tick()
@@ -647,6 +666,16 @@ class Integration(unittest.TestCase):
         self.host.close();state=self.host.state;state[('control','main')]['value']['nextDue']=1
         self.host=Host(state=state);self.addCleanup(self.host.close);self.host.tick(2)
         jobs=self.host.request('api/jobs')['jobs'];self.assertEqual(len(jobs),1);self.assertEqual(jobs[0]['source'],'schedule')
+    def test_schedule_filter_matches_multiple_plans(self):
+        accounts=[{'id':'acct-pro','name':'pro','provider':'openai','enabled':True,'status':'normal','planType':'pro','groups':[]},{'id':'acct-free','name':'free','provider':'openai','enabled':True,'status':'normal','planType':'free','groups':[]}]
+        self.host.additional_accounts=accounts
+        c=self.config();c['schedule'].update({'enabled':True,'filter':{'plans':['plus','pro'],'status':'normal','group':'','keyword':''}})
+        b=self.host.request('api/bootstrap');self.host.request('api/config',{'config':c,'revision':b['configRevision']})
+        self.host.close();state=self.host.state;state[('control','main')]['value']['nextDue']=1
+        self.host=Host(state=state);self.host.additional_accounts=accounts;self.addCleanup(self.host.close);self.host.tick(2)
+        jobs=self.host.request('api/jobs')['jobs']
+        self.assertEqual({j['accountId'] for j in jobs},{'acct-test','acct-pro'})
+        self.assertTrue(all(j['source']=='schedule' for j in jobs))
     def arm_due_schedule(self, **overrides):
         cfg=self.config(**overrides)
         cfg['schedule'].update(enabled=True,scope='ids',accountIds=['acct-test'])

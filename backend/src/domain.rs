@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Filter {
     pub plan: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plans: Vec<String>,
     pub status: String,
     pub group: String,
     pub keyword: String,
@@ -178,6 +180,14 @@ impl Config {
         if s.enabled && s.scope == "ids" && s.account_ids.is_empty() {
             return Err("请指定定时检测账户".into());
         }
+        if s.filter.plans.len() > 100
+            || s.filter
+                .plans
+                .iter()
+                .any(|p| p.trim().is_empty() || p.len() > 64)
+        {
+            return Err("定时订阅类型最多100项，且每项不能为空或超过64字符".into());
+        }
         Ok(())
     }
     pub fn canonical<'a>(&'a self, model: &'a str) -> &'a str {
@@ -240,12 +250,13 @@ pub struct Group {
 }
 impl Account {
     pub fn matches(&self, f: &Filter) -> bool {
-        (f.plan.is_empty()
-            || self
-                .plan_type
-                .as_deref()
-                .unwrap_or("unknown")
-                .eq_ignore_ascii_case(&f.plan))
+        let plan = self.plan_type.as_deref().unwrap_or("unknown");
+        let plan_matches = if !f.plans.is_empty() {
+            f.plans.iter().any(|p| plan.eq_ignore_ascii_case(p))
+        } else {
+            f.plan.is_empty() || plan.eq_ignore_ascii_case(&f.plan)
+        };
+        plan_matches
             && (f.status.is_empty()
                 || if f.status == "disabled" {
                     !self.enabled
@@ -501,6 +512,39 @@ mod tests {
             .insert("my-luna".into(), "gpt-5.6-luna".into());
         j.config.request_model = "my-luna".into();
         assert_eq!(j.classify(&score("gpt-5.6-luna", 1.0)), "no_match");
+    }
+    #[test]
+    fn schedule_plan_filter_supports_multiple_and_legacy_plan() {
+        let account = Account {
+            id: "a".into(),
+            name: "a".into(),
+            email: None,
+            provider: "openai".into(),
+            enabled: true,
+            status: "normal".into(),
+            plan_type: Some("pro".into()),
+            groups: vec![],
+            supported: true,
+        };
+        let mut f = Filter::default();
+        assert!(account.matches(&f));
+        f.plan = "plus".into();
+        assert!(!account.matches(&f));
+        f.plan = "PRO".into();
+        assert!(account.matches(&f));
+        f.plans = vec!["free".into(), "pro".into()];
+        assert!(account.matches(&f));
+        f.plan = "plus".into();
+        assert!(account.matches(&f)); // Multi-select values replace the legacy single value.
+        f.plans = vec!["free".into()];
+        assert!(!account.matches(&f));
+        let mut c = Config::default();
+        c.schedule.filter.plans = vec!["".into()];
+        assert!(
+            c.validate(&["gpt-5.6-luna".into()])
+                .unwrap_err()
+                .contains("定时订阅类型")
+        );
     }
     #[test]
     fn daily_dst_and_interval() {

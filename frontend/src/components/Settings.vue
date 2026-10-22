@@ -9,6 +9,16 @@ import type { Account, Banks, Config, Group } from '../types'
 const props = defineProps<{ config: Config; revision: number; banks: Banks; keys: { id: string; name: string }[]; accounts: Account[]; groups: Group[]; selected: string[]; nextDue: number | null; scheduleError: string | null; busy: boolean }>()
 const emit = defineEmits<{ save: [config: Config]; bank: [operation: 'check' | 'apply' | 'rollback' | 'builtin']; error: [message: string] }>()
 const cfg = ref<Config>(JSON.parse(JSON.stringify(props.config)))
+function normalizeScheduleFilter(config: Config) {
+  const filter = config.schedule.filter
+  if (!Array.isArray(filter.plans)) filter.plans = []
+  // Older saved configs used a single plan value; load it into the multi-select.
+  if (!filter.plans.length && filter.plan) {
+    filter.plans = [filter.plan]
+    filter.plan = ''
+  }
+}
+normalizeScheduleFilter(cfg.value)
 const aliases = ref(Object.entries(cfg.value.aliases).map(([a,b]) => `${a}=${b}`).join('\n'))
 const models = ref<string[]>([])
 const configFile = ref<HTMLInputElement>()
@@ -55,6 +65,7 @@ async function importConfig(event:Event) {
     if(wrapped && (data.format!=='modeltrace-health-config' || data.version!==1 || data.pluginId!=='personal.modeltrace-health'))throw new Error('配置文件类型或版本不受支持')
     const result=await api.previewConfig(wrapped ? data.config : data)
     cfg.value=result.config
+    normalizeScheduleFilter(cfg.value)
     aliases.value=Object.entries(cfg.value.aliases).map(([a,b])=>`${a}=${b}`).join('\n')
     fileNotice.value='配置已载入表单，请核对计量 Key、目标分组和定时范围，再保存。'
   } catch(e) { emit('error',(e as Error).message) }
@@ -64,7 +75,7 @@ const loadingModels = ref(false)
 const modelOptions = computed(() => models.value.map(m => ({ value: m, label: m })))
 const degradedOptions = computed(() => props.banks.active.models.map(m => ({ value: m.id, label: m.label })))
 const groupOptions = computed(() => [{ value: '', label: '全部分组' }, { value: '__ungrouped__', label: '未分组' }, ...props.groups.map(g => ({ value: g.id, label: g.name }))])
-const planOptions = computed(() => [{ value: '', label: '全部订阅' }, ...Array.from(new Set(props.accounts.map(a => a.planType || 'unknown'))).sort().map(p => ({ value: p, label: p }))])
+const planOptions = computed(() => Array.from(new Set(props.accounts.map(a => a.planType || 'unknown'))).sort().map(p => ({ value: p, label: p })))
 const statusOptions = [{ value: '', label: '全部已启用状态' }, ...['normal','error','quota_exhausted','rate_limited'].map(value => ({ value, label: ({ normal:'正常',error:'异常',quota_exhausted:'额度耗尽',rate_limited:'限流' } as Record<string,string>)[value]! }))]
 const number = (event: Event, key: keyof Config) => { (cfg.value as any)[key] = Number((event.target as HTMLInputElement).value) }
 async function fetchModels() { loadingModels.value = true; try { models.value = (await api.models(cfg.value.keyId)).models } catch(e) { emit('error', (e as Error).message) } finally { loadingModels.value = false } }
@@ -75,6 +86,7 @@ function save() {
     mapping[line.slice(0,i).trim()] = line.slice(i+1).trim()
   }
   cfg.value.aliases = mapping
+  if (cfg.value.schedule.filter.plans.length) cfg.value.schedule.filter.plan = ''
   emit('save', JSON.parse(JSON.stringify(cfg.value)))
 }
 </script>
@@ -115,7 +127,7 @@ function save() {
         <label>时区（IANA）<ZInput v-model="cfg.schedule.timezone" placeholder="Asia/Shanghai" aria-label="时区" /></label>
         <label>账户范围<ZSelect v-model="cfg.schedule.scope" :options="[{value:'filter',label:'动态匹配筛选条件'},{value:'ids',label:'固定账户列表'}]" aria-label="定时账户范围" /></label>
         <template v-if="cfg.schedule.scope === 'filter'">
-          <label>订阅类型<ZSelect v-model="cfg.schedule.filter.plan" :options="planOptions" aria-label="定时订阅筛选" /></label>
+          <label>订阅类型<ZSelect v-model="cfg.schedule.filter.plans" multiple clearable collapse-tags :options="planOptions" placeholder="全部订阅" aria-label="定时订阅筛选" /></label>
           <label>账户状态<ZSelect v-model="cfg.schedule.filter.status" :options="statusOptions" aria-label="定时状态筛选" /></label>
           <label>分组<ZSelect v-model="cfg.schedule.filter.group" :options="groupOptions" aria-label="定时分组筛选" /></label>
           <label>账户关键词<ZInput v-model="cfg.schedule.filter.keyword" placeholder="名称、邮箱或ID" aria-label="定时关键词" /></label>
