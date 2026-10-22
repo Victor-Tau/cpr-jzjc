@@ -103,6 +103,7 @@ function save() {
       <label>推理强度<ZSelect v-model="cfg.reasoningEffort" :options="['','none','minimal','low','medium','high','xhigh'].map(s => ({ value:s,label:s || '不传递' }))" aria-label="推理强度" /></label>
       <label>输出 token 上限<input type="number" min="512" max="16384" :value="cfg.maxOutputTokens" @input="number($event,'maxOutputTokens')"></label>
       <label>单次请求超时（秒）<input type="number" min="0" step="1" :value="cfg.timeoutSeconds" @input="number($event,'timeoutSeconds')"><small>默认120秒，0表示不设请求超时。执行时会提前预留校验和保存时间；RS 3.29.7 的后台总预算为30秒，请求最长约29秒；预算内收到的部分正文通过样本校验后可接纳；仅推理内容不能作为样本。</small></label>
+      <label>并行检测数（批内同时探测账户数）<input type="number" min="1" max="16" step="1" :value="cfg.maxConcurrency" @input="number($event,'maxConcurrency')"><small>默认4。同一后台回调内最多并行检测的账户数，提升批量检测整体速度；宿主限制单次回调最多16路并发流，过大也可能触发计量Key限流而浪费重试。</small></label>
     </section>
 
     <section class="panel"><div class="section-heading"><h3>降智与复测规则</h3><ZButton :disabled="busy" @click="useDefaults">使用 1.4 默认规则</ZButton></div><p>请求模型不在降级名单内，最高候选命中名单且概率达到阈值时，按配置轮数确认。</p>

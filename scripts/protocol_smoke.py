@@ -515,17 +515,17 @@ class Integration(unittest.TestCase):
         ids=self.host.request('api/submit',{'accountIds':['acct-test','acct-two'],'requestId':'continuous-batch'})['submitted']
         original=self.host.callback;order=[]
         def callback(method,p,body):
-            if method=='host.model.execute_stream':
-                if order:
-                    self.assertEqual(self.host.state[('jobs',ids[0])]['value']['groupState'],'moved')
-                order.append(p['account_id'])
+            # Parallel waves start peer probes before the first verdict's
+            # account action finishes; both actions still complete inside
+            # this callback before the reports are read.
+            if method=='host.model.execute_stream':order.append(p['account_id'])
             return original(method,p,body)
         self.host.callback=callback;self.host.tick()
         self.assertEqual(len(self.host.executions),2)
         for identity in ids:
             report=self.host.request('api/report?id='+identity)
             self.assertEqual(report['verdict'],'degraded');self.assertEqual(report['groupState'],'moved')
-        self.assertEqual(order,['acct-test','acct-two'])
+        self.assertEqual(sorted(order),['acct-test','acct-two'])
         self.assertEqual(self.host.move_calls,1) # Mock memberships are shared, so the second move is already satisfied.
 
     def test_slow_move_saves_failure_before_budget_and_retry_verifies_without_duplicate(self):
@@ -863,8 +863,49 @@ class Integration(unittest.TestCase):
         self.config(lowConfidencePercent=100,degradedPercent=100,retryDelaySeconds=60)
         ids=self.host.request('api/submit',{'accountIds':['acct-test','acct-two'],'requestId':'fair-queue'})['submitted']
         self.host.tick(2)
-        self.assertEqual([p['account_id'] for p,_ in self.host.executions],['acct-test','acct-two'])
+        # Within one callback the ready accounts are dispatched together, so
+        # execution order is concurrent and not ordered by submission.
+        self.assertEqual(sorted(p['account_id'] for p,_ in self.host.executions),['acct-test','acct-two'])
         for identity in ids:self.assertEqual(len(self.host.request('api/report?id='+identity)['rounds']),1)
+
+    def test_parallel_wave_runs_accounts_together_in_one_callback(self):
+        self.host.additional_accounts=[
+            {'id':'acct-two','name':'second','provider':'openai','enabled':True,'status':'normal','groups':[]},
+            {'id':'acct-three','name':'third','provider':'openai','enabled':True,'status':'normal','groups':[]}]
+        self.assertEqual(self.host.request('api/bootstrap')['config']['maxConcurrency'],4)
+        self.config(lowConfidencePercent=0,degradedPercent=100,maxConcurrency=3)
+        ids=self.host.request('api/submit',{'accountIds':['acct-test','acct-two','acct-three'],'requestId':'parallel-wave'})['submitted']
+        # A three-second upstream read: serial chains would spend about nine
+        # seconds, an overlapped wave waits for one three-second window.
+        self.host.model_read_delay=3
+        started=time.monotonic();self.host.tick();elapsed=time.monotonic()-started
+        self.host.model_read_delay=0
+        self.assertLess(elapsed,7.2)
+        self.assertEqual(len(self.host.executions),3)
+        self.assertEqual(sorted(p['account_id'] for p,_ in self.host.executions),['acct-test','acct-three','acct-two'])
+        for identity in ids:
+            report=self.host.request('api/report?id='+identity)
+            self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1)
+            self.assertFalse(report['pendingProbe'])
+
+    def test_parallel_wave_cancel_targets_single_job(self):
+        self.host.additional_accounts=[{'id':'acct-two','name':'second','provider':'openai','enabled':True,'status':'normal','groups':[]}]
+        self.config(lowConfidencePercent=0,degradedPercent=100,maxConcurrency=2)
+        ids=self.host.request('api/submit',{'accountIds':['acct-test','acct-two'],'requestId':'parallel-cancel'})['submitted']
+        original=self.host.callback;seen=[]
+        def callback(method,p,body):
+            if method=='host.model.stream_read' and not seen:
+                seen.append(method)
+                self.host.request('api/cancel',{'id':ids[1]})
+            return original(method,p,body)
+        self.host.callback=callback;self.host.model_read_delay=2;self.host.tick()
+        self.host.model_read_delay=0
+        self.assertTrue(seen)
+        left=self.host.request('api/report?id='+ids[0]);right=self.host.request('api/report?id='+ids[1])
+        self.assertEqual(left['status'],'completed');self.assertEqual(len(left['rounds']),1)
+        self.assertEqual(right['status'],'cancelled')
+        self.assertEqual(right['attempts'][0]['error'],'管理员取消检测')
+        self.assertFalse(right['pendingProbe'])
 
     def test_parent_budget_times_out_cleanly_without_interrupting_job(self):
         self.config();identity=self.submit();self.host.model_read_delay=31

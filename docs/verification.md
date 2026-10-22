@@ -1,47 +1,39 @@
-# v1.6.1 验证记录
+# v1.7.0 验证记录
 
-修复 RPC v5 WebSocket 载荷被拒绝，导致检测在首个元数据事件后提前关闭的问题。
+参数配置新增「并行检测数」，后台维护回调内的模型检测请求按批并行执行，默认并发4。
 
 适配 Codex Proxy RS `>=3.29.7,<3.30.0`，Linux x86_64，glibc 2.36+。
 
-交付文件：`dist/personal.modeltrace-health-1.6.1-x86_64-unknown-linux-gnu.tar.gz`，30,720,975字节。
+交付文件：`dist/personal.modeltrace-health-1.7.0-x86_64-unknown-linux-gnu.tar.gz`，30,739,398字节，SHA-256 `ee30ddb3f1b8d24d1a459a82867372b8bb9105c6c2bbd63288fda6ca0b60b184`。
 
-## 问题复现与修复
+## 实现与验证要点
 
-原请求记录显示 WebSocket 握手成功、上游返回 `codex.response.metadata` 后，插件立即关闭流；宿主将请求记为 `Cancelled / receiver_dropped`，插件报告正文与流数据均为0。
-
-新增 RPC 回归在旧版二进制上复现失败。修复后同时支持宿主解析视图与原始 WebSocket 消息，复用现有 Responses 事件处理；按原始消息字节数计量，元数据不终止请求，完成快照不重复累计正文。明确失败、无效消息及超限消息继续拒绝，输出上限的有效部分结果继续评分。
+- 每个维护回调把就绪账户按调度键（有效样本优先、来源交替、运行中优先）排序后取前N个（N=并行检测数）同时发起探测；探测任务只做网络工作，任务状态机、样本校验、评分与状态保存仍在主循环串行执行，评分进程为单实例串行复用，无并发评分。
+- 批内实际并发受宿主 RPC 通道与单回调模型流上限（16路）约束；超出的候选账户在下一批继续。
+- 冷启动保护对每回调第一批探测生效：剩余窗口装不下完整请求时顺延到下一次回调，不发送也不计尝试；同回调后续批按剩余窗口记账，保持原有缩短窗口语义。
+- 每任务每次回调仍至多一轮（或一次失败/取消记账）；重试、复测间隔与预算规则未变。取消针对单个任务立即终止其模型流，不影响同批其他任务。
+- 配置新增 `maxConcurrency`（1至16，默认4）随插件私有状态保存；旧状态缺省时按默认生效，宿主配置结构无变化。评分仍保留剩余预算不足300ms时顺延到下一回调的守卫。
 
 ## 构建约束
 
-全部编译命令通过 `taskset -c 0` 绑定到一个 CPU 核心，同时设置 `CARGO_BUILD_JOBS=1`；发布构建另设 `RAYON_NUM_THREADS=1`。使用现有依赖缓存及私有 Python/NumPy 运行时，不重新下载运行时。
-
-按本次发布要求，不执行 SHA-256 校验。跳过 `verify_artifact.py`、运行时重建中的摘要校验、指纹库摘要单元测试以及涉及摘要核对或在线库应用的集成用例。打包 CLI 仅生成宿主格式要求的资源摘要与摘要附件，不核对它们。
+全部编译命令通过 `taskset -c 0` 绑定到一个 CPU 核心，同时设置 `CARGO_BUILD_JOBS=1` 与 `RAYON_NUM_THREADS=1`。使用现有依赖缓存及既有私有 Python/NumPy 运行时（评分 worker 与依赖未变更，不重新下载运行时）。打包使用与 RS 3.29.7 同版的 `cpr-plugin`，安装包为协议v5。
 
 ## 验证结果
 
 | 验证 | 结果 |
 | --- | --- |
-| Rust单元测试 | 16项通过，跳过1项指纹库摘要测试 |
+| Rust单元测试 | 17项通过（含指纹库摘要，locked/offline 单核执行） |
 | Python评分单元测试 | 6项通过 |
 | 静态与前端构建 | Rust fmt、Clippy `-D warnings`、TypeScript与Vite生产构建通过 |
-| 最终安装包RPC集成 | 47项通过：2项新增WebSocket回归（含4个子场景）和45项原有流程；另外5项涉及摘要核对或在线库应用的用例未执行 |
-| 1.6.0 → 1.6.1实际升级 | 配置、配置版本、多订阅定时计划、检测历史、请求诊断、指纹库元数据和提交去重保留，无探针重放；未核对摘要 |
-| 安装包功能 | 协议v5、版本和资源路径确认通过；包内私有Python/NumPy由正式二进制实际解包，完成检测与评分 |
-| 平台兼容 | Linux x86_64、glibc2.36目标构建；最高GLIBC导入符号版本2.34 |
+| RPC回归（debug二进制） | 54项全部通过 |
+| 安装包RPC回归（包内二进制） | 54项全部通过 |
+| 安装包校验 | `verify_artifact.py` 通过：SHA-256 附件一致、manifest/协议v5/资源路径与摘要核对、包内私有Python/NumPy离线评分校验、正式二进制实际解包并完成一轮检测评分 |
+| UI交互回归 | 搜索、筛选、批量、配置（含「并行检测数」默认4与1至16范围）、报告、移动端深色主题通过，无页面错误 |
 
-单核发布构建耗时3分08秒；链接器仅提示旧优化参数被忽略，构建成功。没有在生产宿主安装插件或发送真实账号检测请求。
+新增 RPC 用例：同回调内三账户并行探测（计时断言，覆盖并行批的提速语义）、批内指定账户取消不波及同批其他任务。并调整两处既有断言为并行语义：等待复测不阻塞其他账户（并发下执行顺序不再固定为提交序）、同回调继续检测（确认后的账户操作与同批探测并发，均在回调内完成）。
 
-## 定向回归复现
-
-```bash
-taskset -c 0 env CARGO_BUILD_JOBS=1 cargo test --manifest-path backend/Cargo.toml --locked --offline -- --skip banks::tests
-taskset -c 0 env CARGO_BUILD_JOBS=1 cargo clippy --manifest-path backend/Cargo.toml --locked --offline --all-targets -- -D warnings
-taskset -c 0 .venv/bin/python scripts/protocol_smoke.py --binary /path/to/package/bin/modeltrace-health -v Integration.test_websocket_metadata_then_completion_with_or_without_parsed_data Integration.test_websocket_failure_is_rejected_and_output_limit_can_be_scored
-```
-
-其余 RPC 回归按名称排除 `test_binding_idempotency_and_completed_scoring`、`test_update_atomicity_rollback_and_running_snapshot`、`test_rejects_incompatible_bank_and_rule_conflict`、`test_partial_update_keeps_active_and_cleans_on_restart`、`test_update_survives_restart_and_is_used_by_new_tasks`，以避开摘要校验。升级验证比较配置、计划、报告、请求诊断和指纹库元数据，不核对摘要。
+单核发布构建耗时2分53秒。没有在生产宿主安装插件或发送真实账号检测请求。
 
 ## 历史验证
 
-[1.6.0](verification-v1.6.0.md)、[1.5.1](verification-v1.5.1.md)、[1.5.0](verification-v1.5.0.md)、[1.4.6](verification-v1.4.6.md)。
+[1.6.1](verification-v1.6.1.md)、[1.6.0](verification-v1.6.0.md)、[1.5.1](verification-v1.5.1.md)、[1.5.0](verification-v1.5.0.md)、[1.4.6](verification-v1.4.6.md)。

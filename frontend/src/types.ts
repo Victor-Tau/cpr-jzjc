@@ -4,7 +4,7 @@ export interface Config {
   degradedModels: string[]; aliases: Record<string, string>; lowConfidencePercent: number; degradedPercent: number; confirmationRounds: number;
   lowConfidenceRetries: number; retryDelaySeconds: number; autoDisable: boolean; autoMoveGroup: boolean; targetGroupId: string; retentionDays: number;
   schedule: { enabled: boolean; kind: string; intervalMinutes: number; time: string; timezone: string; scope: string; accountIds: string[]; filter: Filter };
-  autoCheckUpdates: boolean; updateIntervalHours: number; mirrorPrefix: string;
+  autoCheckUpdates: boolean; updateIntervalHours: number; mirrorPrefix: string; maxConcurrency: number;
 }
 export interface Group { id: string; name: string }
 export interface Account { id: string; name: string; email: string | null; provider: string; enabled: boolean; status: string; planType: string | null; groups: { id: string; name: string }[]; supported: boolean }

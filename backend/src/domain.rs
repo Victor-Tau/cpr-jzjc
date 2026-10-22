@@ -63,6 +63,11 @@ pub struct Config {
     pub auto_check_updates: bool,
     pub update_interval_hours: u32,
     pub mirror_prefix: String,
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: u32,
+}
+fn default_max_concurrency() -> u32 {
+    4
 }
 impl Default for Config {
     fn default() -> Self {
@@ -88,6 +93,7 @@ impl Default for Config {
             auto_check_updates: false,
             update_interval_hours: 24,
             mirror_prefix: String::new(),
+            max_concurrency: 4,
         }
     }
 }
@@ -133,6 +139,9 @@ impl Config {
             || self.retry_delay_seconds > 3600
         {
             return Err("确认轮数须为1至5，低置信度复测预算0至5，等待至多3600秒".into());
+        }
+        if !(1..=16).contains(&self.max_concurrency) {
+            return Err("并行检测数须为1至16".into());
         }
         if self.degraded_models.is_empty()
             || self.degraded_models.len() > 32

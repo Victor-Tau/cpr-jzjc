@@ -3,12 +3,13 @@ use crate::{
     banks::{self, Bank, Update},
     domain::*,
     engine::Engine,
-    host::{self, fault, now},
+    host::{self, ExecutionError, ExecutionResult, fault, now},
 };
 use gateway_plugin_sdk::{PluginFault, client::HostClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, sync::Arc};
+use tokio::task::JoinSet;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -817,7 +818,7 @@ impl Manager {
         }
         let mut visited = BTreeSet::new();
         let mut continuing = false;
-        while self.remaining() >= std::time::Duration::from_secs(6) {
+        loop {
             // Finish confirmed actions before dispatching another account. A
             // completed action is persisted before the next one starts.
             if let Some(i) = self
@@ -850,34 +851,95 @@ impl Manager {
                 continuing = true;
                 continue;
             }
-            let next = self
-                .jobs
-                .iter()
-                .enumerate()
-                .filter(|(i, (j, _))| !visited.contains(i) && j.active() && j.next_at <= now())
-                // Alternate ready sources; each job gets at most one round or
-                // failed attempt in this callback, even with a zero retry delay.
-                .min_by_key(|(_, (j, _))| {
-                    (
-                        j.samples.is_empty(),
-                        self.last_job_source.as_deref() == Some(j.source.as_str()),
-                        j.status != "running",
-                    )
-                })
-                .map(|(i, _)| i);
-            let Some(i) = next else { break };
-            visited.insert(i);
-            self.last_job_source = Some(self.jobs[i].0.source.clone());
-            if let Err(e) = self.advance(host, i, continuing).await {
-                if !self.loaded {
-                    return Err(e);
-                }
-                self.jobs[i]
-                    .0
-                    .finish("failed", "inconclusive", e.message, now());
-                self.save_job(host, i).await?;
+            if self.remaining() < std::time::Duration::from_secs(6) {
+                break;
             }
-            continuing = true;
+            let ready = self.ready_queue(&visited);
+            let Some(head) = ready.first().copied() else {
+                break;
+            };
+            // A validated sample only needs a fast scoring call before the
+            // round can complete, so grade it before dispatching probes.
+            if !self.jobs[head].0.samples.is_empty() {
+                visited.insert(head);
+                self.last_job_source = Some(self.jobs[head].0.source.clone());
+                continuing = true;
+                if let Err(e) = self.score_ready(host, head).await {
+                    if !self.loaded {
+                        return Err(e);
+                    }
+                    self.jobs[head]
+                        .0
+                        .finish("failed", "inconclusive", e.message, now());
+                    self.save_job(host, head).await?;
+                }
+                continue;
+            }
+            // Probes of different accounts are independent: each request pins
+            // its own account route, so one maintenance callback can advance
+            // the first round of up to N accounts simultaneously.
+            let wave: Vec<usize> = ready.into_iter().take(self.concurrency()).collect();
+            let mut probes = JoinSet::new();
+            let mut spawned = false;
+            for i in &wave {
+                visited.insert(*i);
+                self.last_job_source = Some(self.jobs[*i].0.source.clone());
+                match self.begin_probe(host, *i, continuing).await {
+                    Ok(Some(task)) => {
+                        spawned = true;
+                        probes.spawn(task.run());
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        if !self.loaded {
+                            return Err(e);
+                        }
+                        self.jobs[*i]
+                            .0
+                            .finish("failed", "inconclusive", e.message, now());
+                        self.save_job(host, *i).await?;
+                    }
+                }
+            }
+            if !spawned {
+                break;
+            }
+            while let Some(completed) = probes.join_next().await {
+                let (id, outcome) = completed.map_err(|_| fault("探针任务异常退出"))?;
+                // Job records are stable during a callback; indices cannot be
+                // invalidated by deletions or additions here.
+                let index = self
+                    .jobs
+                    .iter()
+                    .position(|(j, _)| j.id == id)
+                    .ok_or_else(|| fault("探针任务返回了未知任务"))?;
+                continuing = true;
+                let sampled = match self.finish_probe(host, index, outcome).await {
+                    Ok(sampled) => sampled,
+                    Err(e) => {
+                        if !self.loaded {
+                            return Err(e);
+                        }
+                        self.jobs[index]
+                            .0
+                            .finish("failed", "inconclusive", e.message, now());
+                        self.save_job(host, index).await?;
+                        false
+                    }
+                };
+                if sampled {
+                    // Grade within the same callback whenever the budget allows.
+                    if let Err(e) = self.score_ready(host, index).await {
+                        if !self.loaded {
+                            return Err(e);
+                        }
+                        self.jobs[index]
+                            .0
+                            .finish("failed", "inconclusive", e.message, now());
+                        self.save_job(host, index).await?;
+                    }
+                }
+            }
         }
         // Background downloads must not occupy a callback ahead of ready probes
         // or account actions. Start them only on an idle callback.
@@ -904,73 +966,146 @@ impl Manager {
             .map(|d| d.saturating_duration_since(tokio::time::Instant::now()))
             .unwrap_or_default()
     }
-    async fn advance(
+    fn concurrency(&self) -> usize {
+        self.control.config.max_concurrency.max(1) as usize
+    }
+    fn ready_queue(&self, visited: &BTreeSet<usize>) -> Vec<usize> {
+        // Alternate ready sources; each job gets at most one round or failed
+        // attempt in this callback, even with a zero retry delay. Unstable
+        // checks are folded into a numeric key so ties keep submission order.
+        let mut queue: Vec<(usize, (u8, u8, u8))> = self
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(i, (j, _))| {
+                !visited.contains(i) && j.active() && !j.pending_probe && j.next_at <= now()
+            })
+            .map(|(i, (j, _))| {
+                (
+                    i,
+                    (
+                        u8::from(j.samples.is_empty()),
+                        u8::from(self.last_job_source.as_deref() == Some(j.source.as_str())),
+                        u8::from(j.status != "running"),
+                    ),
+                )
+            })
+            .collect();
+        queue.sort_by_key(|(_, key)| *key);
+        queue.into_iter().map(|(i, _)| i).collect()
+    }
+    /// Grades the stored sample of one job. Probes never run here: a job
+    /// reaches this method only with a validated sample ready for scoring.
+    async fn score_ready(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
+        if self.jobs[i].0.samples.len() != 1 {
+            return Ok(());
+        }
+        // Scoring starts only when the callback still holds a safe share of
+        // its budget; otherwise the validated sample waits for the next
+        // dispatch instead of racing the callback deadline.
+        if self.remaining() < std::time::Duration::from_millis(300) {
+            self.progress
+                .phase(&self.jobs[i].0.id, "waiting_score", json!({}));
+            return Ok(());
+        }
+        self.progress
+            .phase(&self.jobs[i].0.id, "scoring", json!({}));
+        let deadline = self.deadline.unwrap() - std::time::Duration::from_millis(150);
+        let scoring = async {
+            let path = self.prepare_score(host, i).await?;
+            self.engine
+                .call::<_, Score>(
+                    json!({"op":"score","path":path,"samples":self.jobs[i].0.samples}),
+                )
+                .await
+        };
+        let score = match tokio::time::timeout_at(deadline, scoring).await {
+            Ok(result) => result?,
+            Err(_) => {
+                self.progress
+                    .phase(&self.jobs[i].0.id, "waiting_score", json!({}));
+                return Ok(()); // The validated sample is already persisted.
+            }
+        };
+        let j = &mut self.jobs[i].0;
+        let verdict = j.classify(&score);
+        j.rounds.push(Round {
+            number: j.rounds.len() as u32 + 1,
+            verdict: verdict.into(),
+            score,
+            finished_at: now(),
+        });
+        j.samples.clear();
+        j.challenges.clear();
+        j.round_attempts = 0;
+        match verdict {
+            "degraded" => {
+                j.finish("completed", "degraded", "已确认降智", now());
+                if j.config.auto_disable {
+                    j.disable_state = "pending".into();
+                }
+                if j.config.auto_move_group {
+                    j.group_state = "pending".into();
+                }
+                j.action_message();
+            }
+            "suspected" | "low_confidence" => {
+                let exhausted = j.rounds.len() as u32
+                    >= j.config.confirmation_rounds + j.config.low_confidence_retries
+                    || verdict == "low_confidence"
+                        && j.low_retries_used >= j.config.low_confidence_retries;
+                if exhausted {
+                    j.finish(
+                        "completed",
+                        "inconclusive",
+                        "复测预算已耗尽，证据不足，不关闭调度",
+                        now(),
+                    );
+                } else {
+                    if verdict == "low_confidence" {
+                        j.low_retries_used += 1;
+                    }
+                    j.verdict = verdict.into();
+                    j.message = if verdict == "low_confidence" {
+                        "所有模型概率均低于阈值，等待自动复测"
+                    } else {
+                        "疑似降智，等待连续复测确认"
+                    }
+                    .into();
+                    j.next_at = now() + u64::from(j.config.retry_delay_seconds) * 1000;
+                }
+            }
+            "no_match" => j.finish("completed", "no_match", "未降智", now()),
+            _ => j.finish(
+                "completed",
+                "inconclusive",
+                "概率未达到降智判定阈值，证据不足",
+                now(),
+            ),
+        }
+        if j.active() {
+            self.progress
+                .phase(&j.id, "waiting_retest", json!({"nextAt":j.next_at}));
+        }
+        self.save_job(host, i).await
+    }
+    /// Prepares one account for a model probe and returns the request task.
+    /// `Ok(None)` means nothing will be sent this callback: the request was
+    /// cancelled, had been interrupted before, or must not start inside a
+    /// shortened window. All bookkeeping up to `pending_probe` stays here so
+    /// the spawned task only performs network work.
+    async fn begin_probe(
         &mut self,
         host: &HostClient,
         i: usize,
         continuing: bool,
-    ) -> Result<(), PluginFault> {
-        let round = self.jobs[i].0.rounds.len();
-        for _ in 0..5 {
-            if self.progress.is_cancelled(&self.jobs[i].0.id) {
-                self.jobs[i]
-                    .0
-                    .finish("cancelled", "inconclusive", "管理员取消检测", now());
-                return self.save_job(host, i).await;
-            }
-            let remaining = self
-                .deadline
-                .map(|d| d.saturating_duration_since(tokio::time::Instant::now()))
-                .unwrap_or_default();
-            let has_sample = !self.jobs[i].0.samples.is_empty();
-            let minimum = if has_sample {
-                std::time::Duration::from_millis(300)
-            } else {
-                std::time::Duration::from_secs(6)
-            };
-            if remaining < minimum {
-                if self.jobs[i].0.active() && !self.jobs[i].0.samples.is_empty() {
-                    // The sample is already validated and persisted; only
-                    // scoring waits for the next maintenance call. Report the
-                    // wait accurately instead of leaving the UI on "validating".
-                    self.progress
-                        .phase(&self.jobs[i].0.id, "waiting_score", json!({}));
-                }
-                break;
-            }
-            let job = &self.jobs[i].0;
-            if !continuing && !job.challenges.is_empty() && job.samples.is_empty() {
-                let desired = if job.config.timeout_seconds == 0 {
-                    self.request_window
-                } else {
-                    self.request_window
-                        .min(std::time::Duration::from_secs(job.config.timeout_seconds))
-                };
-                let available = remaining.saturating_sub(std::time::Duration::from_millis(600));
-                if available < desired.saturating_sub(std::time::Duration::from_millis(500)) {
-                    // Cold extraction/preparation must not silently shorten every
-                    // probe. Yield without sending or consuming a retry attempt.
-                    self.jobs[i].0.message = "准备完成，等待下一次调度发起请求".into();
-                    self.progress
-                        .phase(&self.jobs[i].0.id, "waiting_request", json!({}));
-                    self.save_job(host, i).await?;
-                    break;
-                }
-            }
-            let attempts = self.jobs[i].0.attempts.len();
-            self.advance_step(host, i).await?;
-            let job = &self.jobs[i].0;
-            if !job.active()
-                || job.rounds.len() > round
-                || job.next_at > now()
-                || (job.attempts.len() > attempts && job.samples.is_empty())
-            {
-                break;
-            }
+    ) -> Result<Option<ProbeTask>, PluginFault> {
+        if self.progress.is_cancelled(&self.jobs[i].0.id) {
+            self.jobs[i]
+                .0
+                .finish("cancelled", "inconclusive", "管理员取消检测", now());
+            return self.save_job(host, i).await.map(|()| None);
         }
-        Ok(())
-    }
-    async fn advance_step(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
         if self.jobs[i].0.pending_probe {
             self.jobs[i].0.finish(
                 "interrupted",
@@ -978,7 +1113,7 @@ impl Manager {
                 "上一次探针执行被中断，请新建检测",
                 now(),
             );
-            return self.save_job(host, i).await;
+            return self.save_job(host, i).await.map(|()| None);
         }
         if self.jobs[i].0.status == "queued" {
             let ident = self.check_identity(host, i).await?;
@@ -988,91 +1123,7 @@ impl Manager {
             self.jobs[i].0.bank_commit = Some(bank.commit);
             self.jobs[i].0.status = "running".into();
             self.jobs[i].0.message = "准备第一轮挑战".into();
-            return self.save_job(host, i).await;
-        }
-        // Each confirmation round uses one valid model response. Additional
-        // requests are retries for failures or belong to later rounds.
-        if self.jobs[i].0.samples.len() == 1 {
-            self.progress
-                .phase(&self.jobs[i].0.id, "scoring", json!({}));
-            let deadline = self.deadline.unwrap() - std::time::Duration::from_millis(150);
-            let scoring = async {
-                let path = self.prepare_score(host, i).await?;
-                self.engine
-                    .call::<_, Score>(
-                        json!({"op":"score","path":path,"samples":self.jobs[i].0.samples}),
-                    )
-                    .await
-            };
-            let score = match tokio::time::timeout_at(deadline, scoring).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    self.progress
-                        .phase(&self.jobs[i].0.id, "waiting_score", json!({}));
-                    return Ok(()); // The validated sample is already persisted.
-                }
-            };
-            let j = &mut self.jobs[i].0;
-            let verdict = j.classify(&score);
-            j.rounds.push(Round {
-                number: j.rounds.len() as u32 + 1,
-                verdict: verdict.into(),
-                score,
-                finished_at: now(),
-            });
-            j.samples.clear();
-            j.challenges.clear();
-            j.round_attempts = 0;
-            match verdict {
-                "degraded" => {
-                    j.finish("completed", "degraded", "已确认降智", now());
-                    if j.config.auto_disable {
-                        j.disable_state = "pending".into();
-                    }
-                    if j.config.auto_move_group {
-                        j.group_state = "pending".into();
-                    }
-                    j.action_message();
-                }
-                "suspected" | "low_confidence" => {
-                    let exhausted = j.rounds.len() as u32
-                        >= j.config.confirmation_rounds + j.config.low_confidence_retries
-                        || verdict == "low_confidence"
-                            && j.low_retries_used >= j.config.low_confidence_retries;
-                    if exhausted {
-                        j.finish(
-                            "completed",
-                            "inconclusive",
-                            "复测预算已耗尽，证据不足，不关闭调度",
-                            now(),
-                        );
-                    } else {
-                        if verdict == "low_confidence" {
-                            j.low_retries_used += 1;
-                        }
-                        j.verdict = verdict.into();
-                        j.message = if verdict == "low_confidence" {
-                            "所有模型概率均低于阈值，等待自动复测"
-                        } else {
-                            "疑似降智，等待连续复测确认"
-                        }
-                        .into();
-                        j.next_at = now() + u64::from(j.config.retry_delay_seconds) * 1000;
-                    }
-                }
-                "no_match" => j.finish("completed", "no_match", "未降智", now()),
-                _ => j.finish(
-                    "completed",
-                    "inconclusive",
-                    "概率未达到降智判定阈值，证据不足",
-                    now(),
-                ),
-            }
-            if j.active() {
-                self.progress
-                    .phase(&j.id, "waiting_retest", json!({"nextAt":j.next_at}));
-            }
-            return self.save_job(host, i).await;
+            self.save_job(host, i).await?;
         }
         if self.jobs[i].0.challenges.is_empty() {
             self.progress
@@ -1080,7 +1131,28 @@ impl Manager {
             self.jobs[i].0.challenges = self.engine.call(json!({"op":"challenges"})).await?;
             self.prepare_score(host, i).await?;
             self.save_job(host, i).await?;
-            return Ok(());
+        }
+        // Cold extraction/preparation must not silently shorten the very
+        // first probes of a callback. Yield without sending or consuming a
+        // retry attempt when the remaining window cannot hold the request.
+        if !continuing {
+            let desired = if self.jobs[i].0.config.timeout_seconds == 0 {
+                self.request_window
+            } else {
+                self.request_window.min(std::time::Duration::from_secs(
+                    self.jobs[i].0.config.timeout_seconds,
+                ))
+            };
+            let available = self
+                .remaining()
+                .saturating_sub(std::time::Duration::from_millis(600));
+            if available < desired.saturating_sub(std::time::Duration::from_millis(500)) {
+                self.jobs[i].0.message = "准备完成，等待下一次调度发起请求".into();
+                self.progress
+                    .phase(&self.jobs[i].0.id, "waiting_request", json!({}));
+                self.save_job(host, i).await?;
+                return Ok(None);
+            }
         }
         let challenge = self.jobs[i].0.challenges[self.jobs[i].0.samples.len()].clone();
         self.check_identity(host, i).await?;
@@ -1089,17 +1161,25 @@ impl Manager {
         self.jobs[i].0.message = format!("第{}轮，正在检测", self.jobs[i].0.rounds.len() + 1);
         self.save_job(host, i).await?;
         self.progress.phase(&self.jobs[i].0.id,"requesting",json!({"round":self.jobs[i].0.rounds.len()+1,"attempt":self.jobs[i].0.round_attempts,"expectedCount":challenge.expected_count}));
-        let request_deadline = self
-            .deadline
-            .map(|d| d - std::time::Duration::from_millis(600));
-        let result = host::execute(
-            host,
-            &self.jobs[i].0,
-            &challenge.prompt,
-            request_deadline,
-            self.progress.clone(),
-        )
-        .await;
+        Ok(Some(ProbeTask {
+            job: self.jobs[i].0.clone(),
+            prompt: challenge.prompt,
+            host: host.clone(),
+            deadline: self
+                .deadline
+                .map(|d| d - std::time::Duration::from_millis(600)),
+            progress: self.progress.clone(),
+        }))
+    }
+    /// Consumes one probe outcome: records the attempt, validates a received
+    /// answer and updates the job. Returns whether a validated sample now
+    /// waits for scoring.
+    async fn finish_probe(
+        &mut self,
+        host: &HostClient,
+        i: usize,
+        result: Result<ExecutionResult, Box<ExecutionError>>,
+    ) -> Result<bool, PluginFault> {
         if self.progress.is_cancelled(&self.jobs[i].0.id) {
             let request_id = match result {
                 Ok(result) => Some(result.request_id),
@@ -1115,7 +1195,7 @@ impl Manager {
             self.jobs[i]
                 .0
                 .finish("cancelled", "inconclusive", "管理员取消检测", now());
-            return self.save_job(host, i).await;
+            return self.save_job(host, i).await.map(|()| false);
         }
         self.progress
             .phase(&self.jobs[i].0.id, "validating", json!({}));
@@ -1123,6 +1203,7 @@ impl Manager {
         let diagnostics;
         let (request_id, numbers, error) = match result {
             Ok(result) => {
+                let challenge = &self.jobs[i].0.challenges[self.jobs[i].0.samples.len()];
                 let partial = result.diagnostics.partial;
                 diagnostics = Some(result.diagnostics);
                 match self.engine.call::<_, Vec<u32>>(
@@ -1146,6 +1227,8 @@ impl Manager {
                 && d.budget_ms
                     .is_some_and(|ms| u128::from(ms) >= full_window_ms)
         };
+        let challenge_expected =
+            self.jobs[i].0.challenges[self.jobs[i].0.samples.len()].expected_count;
         let j = &mut self.jobs[i].0;
         let repeated_budget_timeout = diagnostics.as_ref().is_some_and(full_budget_timeout)
             && j.attempts
@@ -1160,10 +1243,11 @@ impl Manager {
             error: error.clone(),
             diagnostics,
         });
+        let sampled;
         if let Some(numbers) = numbers {
             j.samples.push(Sample {
                 numbers,
-                expected_count: challenge.expected_count,
+                expected_count: challenge_expected,
             });
             j.message = if j
                 .attempts
@@ -1176,6 +1260,7 @@ impl Manager {
                 "已获得本轮有效样本，等待评分"
             }
             .into();
+            sampled = true;
         } else if permanent || repeated_budget_timeout || j.round_attempts >= 5 {
             j.finish(
                 "failed",
@@ -1190,12 +1275,39 @@ impl Manager {
                 },
                 now(),
             );
+            sampled = false;
         } else {
             j.message = format!("{}；等待重试", error.unwrap_or_default());
             j.next_at = now() + u64::from(j.config.retry_delay_seconds) * 1000;
             self.progress
                 .phase(&j.id, "waiting_retry", json!({"nextAt":j.next_at}));
+            sampled = false;
         }
-        self.save_job(host, i).await
+        self.save_job(host, i).await?;
+        Ok(sampled)
+    }
+}
+
+/// One in-flight model probe. The task owns only network work: it never
+/// touches jobs, host state or the scoring worker, so several of them can run
+/// at the same time inside a single maintenance callback.
+struct ProbeTask {
+    job: crate::domain::Job,
+    prompt: String,
+    host: HostClient,
+    deadline: Option<tokio::time::Instant>,
+    progress: Arc<Progress>,
+}
+impl ProbeTask {
+    async fn run(self) -> (String, Result<ExecutionResult, Box<ExecutionError>>) {
+        let outcome = host::execute(
+            &self.host,
+            &self.job,
+            &self.prompt,
+            self.deadline,
+            self.progress,
+        )
+        .await;
+        (self.job.id.clone(), outcome)
     }
 }
