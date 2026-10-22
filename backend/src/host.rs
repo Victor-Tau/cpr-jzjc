@@ -387,14 +387,7 @@ pub async fn execute(
                     if w.protocol != "openai" {
                         return Err(fault("模型协议无效"));
                     }
-                    match w.payload {
-                        WirePayload::Json { data, .. } => {
-                            response.add_bytes(data.to_string().len() + 8)?;
-                            response.event(data)?;
-                        }
-                        WirePayload::RawSse { frame } => response.sse(&frame)?,
-                        _ => return Err(fault("模型未返回Responses事件")),
-                    }
+                    response.wire(w.payload)?;
                 }
             }
             if last_update.elapsed() >= std::time::Duration::from_millis(250) || state.end {
@@ -530,7 +523,7 @@ pub async fn execute(
         },
     }))
 }
-/// Keeps only complete SSE frames and separates visible output from reasoning.
+/// Accepts Responses JSON, WebSocket messages and complete SSE frames.
 /// Terminal snapshots replace deltas so retransmitted text is not counted twice.
 #[derive(Default)]
 struct StreamResponse {
@@ -544,6 +537,28 @@ struct StreamResponse {
 }
 
 impl StreamResponse {
+    fn wire(&mut self, payload: WirePayload) -> Result<(), PluginFault> {
+        match payload {
+            WirePayload::Json { data, .. } => {
+                self.add_bytes(data.to_string().len() + 8)?;
+                self.event(data)
+            }
+            WirePayload::WebSocket { data, message, .. } => {
+                self.add_bytes(message.len())?;
+                // RPC v5 preserves native WebSocket messages. The host may also
+                // provide a parsed view; decode the complete message otherwise.
+                let data = match data {
+                    Some(data) => data,
+                    None => serde_json::from_slice(&message)
+                        .map_err(|_| fault("模型WebSocket JSON无效"))?,
+                };
+                self.event(data)
+            }
+            WirePayload::RawSse { frame } => self.sse(&frame),
+            _ => Err(fault("模型未返回Responses事件")),
+        }
+    }
+
     fn add_bytes(&mut self, bytes: usize) -> Result<(), PluginFault> {
         self.received_bytes += bytes;
         if self.received_bytes > 1024 * 1024 {
@@ -681,6 +696,65 @@ mod tests {
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["account_id"], "account-with-proxy");
         assert_eq!(value["provider"], "openai");
+    }
+
+    #[test]
+    fn websocket_metadata_and_output_use_native_message_bytes() {
+        let mut response = StreamResponse::default();
+        let mut bytes = 0;
+        for data in [
+            json!({"type":"codex.response.metadata","headers":{"x-models-etag":"test"}}),
+            json!({"type":"response.output_text.delta","delta":"12,35"}),
+            json!({"type":"response.completed","response":{"output":[
+                {"content":[{"type":"output_text","text":"12,35"}]}
+            ]}}),
+        ] {
+            let message = serde_json::to_vec_pretty(&data).unwrap();
+            bytes += message.len();
+            response
+                .wire(WirePayload::WebSocket {
+                    event: None,
+                    data: Some(data),
+                    message,
+                })
+                .unwrap();
+        }
+        assert_eq!(response.text().as_deref(), Some("12,35"));
+        assert_eq!(response.terminal, Some("completed"));
+        assert_eq!(response.received_bytes, bytes);
+        assert_eq!(response.output_bytes(), 5);
+    }
+
+    #[test]
+    fn websocket_without_parsed_view_decodes_complete_message() {
+        let mut response = StreamResponse::default();
+        response
+            .wire(WirePayload::WebSocket {
+                event: None,
+                data: None,
+                message: br#"{"type":"response.output_text.delta","delta":"12,35,"}"#.to_vec(),
+            })
+            .unwrap();
+        assert_eq!(response.text().as_deref(), Some("12,35,"));
+    }
+
+    #[test]
+    fn websocket_rejects_malformed_failed_and_oversized_messages() {
+        for message in [
+            b"not json".to_vec(),
+            br#"{"type":"response.failed"}"#.to_vec(),
+            vec![b' '; 1024 * 1024 + 1],
+        ] {
+            assert!(
+                StreamResponse::default()
+                    .wire(WirePayload::WebSocket {
+                        event: None,
+                        data: None,
+                        message,
+                    })
+                    .is_err()
+            );
+        }
     }
 
     #[test]

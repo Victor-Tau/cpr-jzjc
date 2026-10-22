@@ -20,11 +20,14 @@ DENY_TIMESTAMPS=False
 RUNTIME_TMPDIR=None
 def raw(v): return json.dumps(v,ensure_ascii=False,separators=(",",":"),allow_nan=False).encode()
 
-def model_events(*values, end=False):
+def model_events(*values, end=False, wire_kind='json', parsed=True):
     events=[]
     for value in values:
-        event=raw({'wire':{'protocol':'openai','payload':{'kind':'json','event':None,'data':value}}})
-        events.append(b'GPE2'+struct.pack('>III',len(event),0,0)+event)
+        message=raw(value) if wire_kind=='web_socket' else b''
+        payload={'kind':wire_kind,'event':None,'data':value if parsed else None}
+        if wire_kind=='web_socket':payload['message']=[]
+        event=raw({'wire':{'protocol':'openai','payload':payload}})
+        events.append(b'GPE2'+struct.pack('>III',len(event),len(message),0)+event+message)
     return {'events':len(events),'end':end},b'HME1'+struct.pack('>I',len(events))+b''.join(struct.pack('>I',len(e)) for e in events)+b''.join(events)
 
 class Host:
@@ -438,6 +441,60 @@ class Integration(unittest.TestCase):
                 else:
                     self.host.request('api/cancel',{'id':identity})
                     self.assertIsNotNone(report['attempts'][0]['error']);self.assertEqual(report['rounds'],[])
+
+    def test_websocket_metadata_then_completion_with_or_without_parsed_data(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        original=self.host.callback
+        for parsed in [True,False]:
+            with self.subTest(parsed=parsed):
+                identity=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':f'ws-{parsed}'})['submitted'][0]
+                reads=[]
+                text='12,34,56,'*80
+                def callback(method,p,body):
+                    if method=='host.model.stream_read':
+                        reads.append(True)
+                        if len(reads)==1:
+                            return model_events({'type':'codex.response.metadata','headers':{'x-models-etag':'test'}},wire_kind='web_socket',parsed=parsed)
+                        if len(reads)>2:raise AssertionError('completed WebSocket must stop reading')
+                        return model_events({'type':'response.reasoning_summary_text.delta','delta':'推理'},
+                                            {'type':'response.output_text.delta','delta':text},
+                                            {'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':text}]}]}},
+                                            wire_kind='web_socket',parsed=parsed)
+                    return original(method,p,body)
+                self.host.callback=callback;self.host.tick()
+                report=self.host.request('api/report?id='+identity)
+                self.assertEqual(report['status'],'completed');self.assertEqual(len(reads),2)
+                self.assertEqual(len(report['attempts']),1);self.assertIsNone(report['attempts'][0]['error'])
+                d=report['attempts'][0]['diagnostics']
+                self.assertEqual(d['kind'],'completed');self.assertEqual(d['outputBytes'],len(text.encode()))
+                self.assertEqual(d['reasoningBytes'],len('推理'.encode()));self.assertGreater(d['receivedBytes'],d['outputBytes'])
+                self.assertEqual(len(report['rounds']),1)
+
+    def test_websocket_failure_is_rejected_and_output_limit_can_be_scored(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100,autoDisable=True,autoMoveGroup=True,targetGroupId='group-degraded')
+        original=self.host.callback
+        for terminal in ['response.failed','response.incomplete']:
+            with self.subTest(terminal=terminal):
+                identity=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':terminal})['submitted'][0]
+                def callback(method,p,body):
+                    if method=='host.model.stream_read':
+                        return model_events({'type':'response.output_text.delta','delta':'12,34,56,'*80},
+                                            {'type':terminal,'response':{'incomplete_details':{'reason':'max_output_tokens'}}},
+                                            wire_kind='web_socket',end=True)
+                    return original(method,p,body)
+                self.host.callback=callback;self.host.tick()
+                report=self.host.request('api/report?id='+identity)
+                if terminal=='response.failed':
+                    self.assertIsNotNone(report['attempts'][0]['error']);self.assertEqual(report['rounds'],[])
+                    self.assertGreater(report['attempts'][0]['diagnostics']['outputBytes'],0)
+                    self.assertGreater(report['attempts'][0]['diagnostics']['receivedBytes'],0)
+                    self.assertEqual(self.host.state[('jobs',identity)]['value']['samples'],[])
+                    self.assertEqual(self.host.disable_calls+self.host.move_calls,0)
+                    self.host.request('api/cancel',{'id':identity})
+                else:
+                    self.assertEqual(report['status'],'completed');self.assertIsNone(report['attempts'][0]['error'])
+                    self.assertEqual(report['attempts'][0]['diagnostics']['kind'],'output_limit')
+                    self.assertTrue(report['attempts'][0]['diagnostics']['partial'])
 
     def test_completed_event_closes_lingering_stream_without_waiting_for_eof(self):
         self.config(lowConfidencePercent=0,degradedPercent=100)

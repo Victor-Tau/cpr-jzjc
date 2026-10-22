@@ -8,11 +8,17 @@
 
 在宿主「插件管理 → 安装插件 → 上传包」上传：
 
-`dist/personal.modeltrace-health-1.6.0-x86_64-unknown-linux-gnu.tar.gz`
+`dist/personal.modeltrace-health-1.6.1-x86_64-unknown-linux-gnu.tar.gz`
 
 启用后打开「账号降智检测」，进入「参数配置」选择已有计量 Key，保存后即可单号或批量检测。检测请求由宿主按指定账户 ID 执行，使用该账户绑定的代理并计入所选 Key。Key 的账户分组和模型权限仍由宿主校验。页面仅接收 Key ID 和名称。
 
 运行时首次检测会解出约91MB文件，目标目录需可写、可执行并有足够空间。自动跳过 `noexec` 临时目录，解包失败时清理残留并尝试 `/var/tmp`，兼容 Docker 中仅64MB且禁止执行的 `/tmp`。可用宿主进程的 `MODELTRACE_RUNTIME_DIR` 指定首选目录，或用 `TMPDIR` 修改系统临时目录。解包不恢复不必要的文件时间戳；异常会显示具体条目和系统错误。
+
+### 1.6.1 WebSocket 检测兼容修复
+
+- 修复新版宿主通过 WebSocket 返回模型事件时，插件收到首个元数据事件就提前关闭请求的问题。此前可能表现为账号测试正常，但插件检测在约一秒内失败、正文和流数据均为0。
+- 支持 SDK RPC v5 的原生 WebSocket 载荷，优先使用宿主解析视图，无解析视图时解析完整消息；元数据事件继续等待正文，完成事件及时停止接收。
+- WebSocket 正文、推理、部分结果和上游失败沿用现有判定规则，流数据按原始消息字节数统计。更新现有实例保留配置、自动计划、指纹库和检测历史。
 
 ### 1.6.0 检测历史批量删除与定时订阅多选
 
@@ -163,7 +169,7 @@ cargo build --manifest-path backend/Cargo.toml --locked
 .venv/bin/python scripts/build_runtime.py
 cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu.2.36
 cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
-.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.6.0-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.6.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 基础镜像已缓存时可向 `build_runtime.py` 传 `--base-tar /path/python-base.tar`。脚本验证固定镜像配置、各镜像层和NumPy wheel哈希，不依赖Docker守护进程。`scripts/package.sh` 可串联构建和校验，需在已激活的开发环境运行。

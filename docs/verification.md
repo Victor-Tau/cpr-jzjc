@@ -1,51 +1,47 @@
-# v1.6.0 验证记录
+# v1.6.1 验证记录
 
-检测历史批量删除、`api/delete` 批量接口与定时订阅多选。
+修复 RPC v5 WebSocket 载荷被拒绝，导致检测在首个元数据事件后提前关闭的问题。
 
 适配 Codex Proxy RS `>=3.29.7,<3.30.0`，Linux x86_64，glibc 2.36+。
 
-交付文件：`dist/personal.modeltrace-health-1.6.0-x86_64-unknown-linux-gnu.tar.gz`，30,720,417字节。
+交付文件：`dist/personal.modeltrace-health-1.6.1-x86_64-unknown-linux-gnu.tar.gz`，30,720,975字节。
 
-SHA-256：`0d663a980c8e000fb1a3a4728a081a00a8f8aa4a4b9738d32ff85341a14ac5ea`。
+## 问题复现与修复
 
-## 验证范围
+原请求记录显示 WebSocket 握手成功、上游返回 `codex.response.metadata` 后，插件立即关闭流；宿主将请求记为 `Cancelled / receiver_dropped`，插件报告正文与流数据均为0。
 
-- 检测历史新增选择列和「全选筛选结果」，按当前搜索与结论筛选选择全部可删除记录；跨页选择保留，可一次删除所选记录。
-- 正在排队、检测中或等待关闭调度、移组的记录不可选择；批量删除跳过此类记录并返回 `deleted`、`skipped`。单条删除与旧版 `{id}` 请求保持兼容。
-- 批量删除只删除历史与报告，不恢复已停用账户，不改变账户分组或调度状态；配置、自动计划、指纹库和提交去重状态均不受影响。
-- 自动定时检测的订阅类型改为多选，按账户订阅类型匹配任一选中项；留空表示全部。旧配置的单一订阅值可继续运行，界面载入时自动转换为多选。
-- 插件 ID 不变；新增的定时订阅多选字段向后兼容旧配置与状态。从 1.5.1 更新保留现有配置、自动计划、指纹库和检测历史。
+新增 RPC 回归在旧版二进制上复现失败。修复后同时支持宿主解析视图与原始 WebSocket 消息，复用现有 Responses 事件处理；按原始消息字节数计量，元数据不终止请求，完成快照不重复累计正文。明确失败、无效消息及超限消息继续拒绝，输出上限的有效部分结果继续评分。
 
-使用 Rust 1.99.1、Node 24.22.0 与 pnpm 10.32.1 构建，发布二进制通过 `CARGO_BUILD_JOBS=1` 单核编译。
+## 构建约束
+
+全部编译命令通过 `taskset -c 0` 绑定到一个 CPU 核心，同时设置 `CARGO_BUILD_JOBS=1`；发布构建另设 `RAYON_NUM_THREADS=1`。使用现有依赖缓存及私有 Python/NumPy 运行时，不重新下载运行时。
+
+按本次发布要求，不执行 SHA-256 校验。跳过 `verify_artifact.py`、运行时重建中的摘要校验、指纹库摘要单元测试以及涉及摘要核对或在线库应用的集成用例。打包 CLI 仅生成宿主格式要求的资源摘要与摘要附件，不核对它们。
 
 ## 验证结果
 
 | 验证 | 结果 |
 | --- | --- |
-| Rust单元测试 | 14项通过 |
+| Rust单元测试 | 16项通过，跳过1项指纹库摘要测试 |
 | Python评分单元测试 | 6项通过 |
-| 静态与前端构建 | Rust fmt、Clippy `-D warnings`、TypeScript、Vite生产构建与pnpm冻结依赖安装通过 |
-| 最终安装包RPC集成 | 50项全部通过；新增批量删除、活动记录跳过、旧版单条删除兼容与多订阅定时筛选回归 |
-| 1.5.1 → 1.6.0实际升级 | 配置、配置版本、自动计划、检测历史、请求记录、指纹库与提交去重保留，无探针重放 |
-| 安装包 | 包及全部资源SHA-256、协议v5清单、内置Python/NumPy离线评分、Rust实际解包和完整检测通过，内置18个模型 |
-| 平台兼容 | 正式二进制目标为Linux x86_64、glibc2.36；最高GLIBC导入符号版本2.34 |
-| 浏览器交互 | 28组交互通过，新增历史全选、批量删除与定时订阅多选，无页面JavaScript异常 |
+| 静态与前端构建 | Rust fmt、Clippy `-D warnings`、TypeScript与Vite生产构建通过 |
+| 最终安装包RPC集成 | 47项通过：2项新增WebSocket回归（含4个子场景）和45项原有流程；另外5项涉及摘要核对或在线库应用的用例未执行 |
+| 1.6.0 → 1.6.1实际升级 | 配置、配置版本、多订阅定时计划、检测历史、请求诊断、指纹库元数据和提交去重保留，无探针重放；未核对摘要 |
+| 安装包功能 | 协议v5、版本和资源路径确认通过；包内私有Python/NumPy由正式二进制实际解包，完成检测与评分 |
+| 平台兼容 | Linux x86_64、glibc2.36目标构建；最高GLIBC导入符号版本2.34 |
 
-## 复现
+单核发布构建耗时3分08秒；链接器仅提示旧优化参数被忽略，构建成功。没有在生产宿主安装插件或发送真实账号检测请求。
+
+## 定向回归复现
 
 ```bash
-cargo test --manifest-path backend/Cargo.toml --locked
-cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
-.venv/bin/python -m unittest discover -s engine/tests -v
-pnpm --dir frontend install --frozen-lockfile
-pnpm --dir frontend build
-.venv/bin/python scripts/protocol_smoke.py --binary /path/to/package/bin/modeltrace-health -v
-.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.6.0-x86_64-unknown-linux-gnu.tar.gz
-.venv/bin/python scripts/upgrade_smoke.py dist/personal.modeltrace-health-1.5.1-x86_64-unknown-linux-gnu.tar.gz dist/personal.modeltrace-health-1.6.0-x86_64-unknown-linux-gnu.tar.gz
-.venv/bin/python scripts/ui_fixture.py --binary /path/to/package/bin/modeltrace-health
-PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin node scripts/ui_smoke.mjs
+taskset -c 0 env CARGO_BUILD_JOBS=1 cargo test --manifest-path backend/Cargo.toml --locked --offline -- --skip banks::tests
+taskset -c 0 env CARGO_BUILD_JOBS=1 cargo clippy --manifest-path backend/Cargo.toml --locked --offline --all-targets -- -D warnings
+taskset -c 0 .venv/bin/python scripts/protocol_smoke.py --binary /path/to/package/bin/modeltrace-health -v Integration.test_websocket_metadata_then_completion_with_or_without_parsed_data Integration.test_websocket_failure_is_rejected_and_output_limit_can_be_scored
 ```
 
-界面截图：[账户](screenshots/accounts.png)、[配置](screenshots/settings.png)、[报告](screenshots/report.png)、[移动端](screenshots/mobile.png)、[历史批量选择](screenshots/history.png)。
+其余 RPC 回归按名称排除 `test_binding_idempotency_and_completed_scoring`、`test_update_atomicity_rollback_and_running_snapshot`、`test_rejects_incompatible_bank_and_rule_conflict`、`test_partial_update_keeps_active_and_cleans_on_restart`、`test_update_survives_restart_and_is_used_by_new_tasks`，以避开摘要校验。升级验证比较配置、计划、报告、请求诊断和指纹库元数据，不核对摘要。
 
-历史验证：[1.5.1](verification-v1.5.1.md)、[1.5.0](verification-v1.5.0.md)、[1.4.6](verification-v1.4.6.md)、[1.4.5](verification-v1.4.5.md)、[1.4.3](verification-v1.4.3.md)、[1.4.2](verification-v1.4.2.md)、[1.4.1](verification-v1.4.1.md)、[1.4.0](verification-v1.4.0.md)、[1.3.0](verification-v1.3.0.md)。
+## 历史验证
+
+[1.6.0](verification-v1.6.0.md)、[1.5.1](verification-v1.5.1.md)、[1.5.0](verification-v1.5.0.md)、[1.4.6](verification-v1.4.6.md)。
