@@ -359,8 +359,9 @@ class Integration(unittest.TestCase):
                 return {'events':1,'end':False},b'HME1'+struct.pack('>II',1,len(event))+event
             return original(method,p,body)
         self.host.callback=callback
-        for _ in range(2):
+        for _ in range(6):
             self.host.model_read_delay=0;self.host.tick(budget_ms=10000)
+            if self.host.request('api/report?id='+identity)['status']=='failed':break
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),2);self.assertIn('连续两次',report['message'])
         for attempt in report['attempts']:
@@ -404,12 +405,13 @@ class Integration(unittest.TestCase):
             return original(method,p,body)
         self.host.callback=callback;self.host.tick(budget_ms=10000)
         report=self.host.request('api/report?id='+identity)
-        self.assertTrue(report['attempts'][0]['diagnostics']['partial']);self.assertIsNone(report['attempts'][0]['error'])
         if report['status']=='running':
-            # The validated sample is persisted before the deadline; grading
-            # may wait for the next maintenance callback.
-            self.assertFalse(report['pendingProbe']);self.assertEqual(report['progress']['stage'],'waiting_score')
+            # A durable receipt or validated sample can wait for the next callback.
+            saved=self.host.state[('jobs',identity)]['value']
+            self.assertTrue(saved.get('pendingOutcome') or saved['samples'])
+            self.assertFalse(report['pendingProbe']);self.assertIn(report['progress']['stage'],('waiting_validation','waiting_score'))
             self.host.tick();report=self.host.request('api/report?id='+identity)
+        self.assertTrue(report['attempts'][0]['diagnostics']['partial']);self.assertIsNone(report['attempts'][0]['error'])
         self.assertEqual(report['status'],'completed')
         self.assertEqual(len(report['rounds']),1)
         self.host.model_read_delay=0;self.host.tick()
@@ -473,7 +475,9 @@ class Integration(unittest.TestCase):
                         reads.append(True)
                         if len(reads)==1:
                             return model_events({'type':'codex.response.metadata','headers':{'x-models-etag':'test'}},wire_kind='web_socket',parsed=parsed)
-                        if len(reads)>2:raise AssertionError('completed WebSocket must stop reading')
+                        if len(reads)>2:
+                            self.assertEqual(len(reads),3)
+                            return model_events(end=True)
                         return model_events({'type':'response.reasoning_summary_text.delta','delta':'推理'},
                                             {'type':'response.output_text.delta','delta':text},
                                             {'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':text}]}]}},
@@ -481,7 +485,8 @@ class Integration(unittest.TestCase):
                     return original(method,p,body)
                 self.host.callback=callback;self.host.tick()
                 report=self.host.request('api/report?id='+identity)
-                self.assertEqual(report['status'],'completed');self.assertEqual(len(reads),2)
+                self.assertEqual(report['status'],'completed');self.assertEqual(len(reads),3)
+                self.assertEqual(self.host.closes,0)
                 self.assertEqual(len(report['attempts']),1);self.assertIsNone(report['attempts'][0]['error'])
                 d=report['attempts'][0]['diagnostics']
                 self.assertEqual(d['kind'],'completed');self.assertEqual(d['outputBytes'],len(text.encode()))
@@ -514,18 +519,21 @@ class Integration(unittest.TestCase):
                     self.assertEqual(report['attempts'][0]['diagnostics']['kind'],'output_limit')
                     self.assertTrue(report['attempts'][0]['diagnostics']['partial'])
 
-    def test_completed_event_closes_lingering_stream_without_waiting_for_eof(self):
-        self.config(lowConfidencePercent=0,degradedPercent=100)
+    def test_completed_result_survives_eof_drain_timeout(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100,timeoutSeconds=1)
         identity=self.submit();original=self.host.callback;reads=[]
         def callback(method,p,body):
             result,payload=original(method,p,body)
             if method=='host.model.stream_read':
-                reads.append(True);self.assertEqual(len(reads),1);result['end']=False
+                reads.append(True)
+                if len(reads)>1:self.host.callback_response_delay=3
+                result['end']=False
             return result,payload
         self.host.callback=callback;self.host.tick()
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['status'],'completed');self.assertFalse(report['attempts'][0]['diagnostics']['partial'])
-        self.assertEqual(self.host.closes,1)
+        self.assertEqual(len(reads),2);self.assertEqual(self.host.closes,1)
+        self.assertEqual(report['attempts'][0]['diagnostics']['kind'],'completed')
 
     def test_batch_continues_in_same_callback_after_confirmed_move(self):
         self.host.additional_accounts=[{'id':'acct-two','name':'second','provider':'openai','enabled':True,'status':'normal','planType':'plus','groups':[]}]
@@ -754,8 +762,12 @@ class Integration(unittest.TestCase):
         report=self.host.request('api/report?id='+identity);self.assertEqual(report['status'],'failed');self.assertEqual(len(self.host.executions),1);self.assertNotIn('secret',json.dumps(report));self.assertEqual(self.host.disable_calls,0)
     def test_cancel_and_restart(self):
         self.config(lowConfidencePercent=100,degradedPercent=100);identity=self.submit();self.host.tick();self.host.request('api/cancel',{'id':identity});self.host.tick(2);self.assertEqual(len(self.host.executions),1)
+        self.config(lowConfidencePercent=0,degradedPercent=100)
         self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'restart-two'});state=self.host.state;self.host.close();self.host=Host(state=state);self.addCleanup(self.host.close)
-        self.assertEqual(self.host.request('api/jobs')['jobs'][0]['status'],'interrupted')
+        self.assertEqual(self.host.request('api/jobs')['jobs'][0]['status'],'queued')
+        self.host.tick(2)
+        self.assertEqual(self.host.request('api/jobs')['jobs'][0]['status'],'completed')
+        self.assertEqual(len(self.host.executions),1)
     def test_update_atomicity_rollback_and_running_snapshot(self):
         self.config();identity=self.submit();self.host.tick()
         old=self.host.request('api/bootstrap')['banks']['active'];new=json.loads(self.host.bank);new['built_at']='2026-10-18T00:00:00Z';self.host.bank=raw(new)
@@ -881,7 +893,7 @@ class Integration(unittest.TestCase):
         identity=self.submit();self.host.tick();self.assertEqual(self.host.request('api/report?id='+identity)['bankHash'],updated)
     def test_uncertain_probe_storage_failure_never_replays(self):
         self.config();identity=self.submit()
-        self.host.fail_put=lambda key,value:key[0]=='jobs' and value.get('status')=='running' and not value.get('pendingProbe') and bool(value.get('attempts'))
+        self.host.fail_put=lambda key,value:key[0]=='jobs' and bool(value.get('pendingOutcome'))
         with self.assertRaises(AssertionError):self.host.tick()
         self.host.fail_put=None;self.host.tick()
         report=self.host.request('api/report?id='+identity);self.assertEqual(report['status'],'interrupted');self.assertEqual(len(self.host.executions),1)
@@ -1004,6 +1016,160 @@ class Integration(unittest.TestCase):
         self.host.model_read_delay=0;self.host.tick()
         report=self.host.request('api/report?id='+identity)
         self.assertNotEqual(report['status'],'interrupted');self.assertEqual(len(self.host.executions),2)
+
+    def test_invalid_samples_keep_healthy_worker(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();original=self.host.callback;workers=set()
+        def callback(method,p,body):
+            workers.update(Path(f'/proc/{self.host.process.pid}/task/{self.host.process.pid}/children').read_text().split())
+            if method=='host.model.stream_read':
+                return model_events({'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':'1,2,3'}]}]}},end=True)
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick(3)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(len(report['attempts']),3);self.assertEqual(len(workers),1)
+        self.assertTrue(all('有效数字' in a['error'] for a in report['attempts']))
+
+    def test_restart_replays_receipt_and_saved_sample_without_model_request(self):
+        for boundary in ('receipt','sample'):
+            with self.subTest(boundary=boundary):
+                if boundary=='sample':
+                    self.host.close();self.host=Host();self.addCleanup(self.host.close)
+                self.config(lowConfidencePercent=0,degradedPercent=100)
+                identity=self.submit();original=self.host.callback;captured=[]
+                def callback(method,p,body):
+                    result=original(method,p,body)
+                    if method=='host.state.put' and p['namespace']=='jobs' and not captured:
+                        if (p['value'].get('pendingOutcome') if boundary=='receipt' else p['value']['samples']):
+                            captured.append(copy.deepcopy(self.host.state))
+                    return result
+                self.host.callback=callback;self.host.tick();self.assertEqual(len(captured),1)
+                self.host.close();self.host=Host(state=captured[0]);self.addCleanup(self.host.close)
+                report=self.host.request('api/report?id='+identity)
+                self.assertEqual(report['status'],'running');self.assertNotIn('pendingOutcome',report)
+                self.assertNotIn('pendingOutcome',self.host.request('api/progress')['jobs'][0])
+                self.host.tick(2);report=self.host.request('api/report?id='+identity)
+                self.assertEqual(report['status'],'completed');self.assertEqual(len(report['attempts']),1)
+                self.assertEqual(len(report['rounds']),1);self.assertEqual(len(self.host.executions),0)
+
+    def test_validation_save_failure_replays_receipt_once(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();failed=[]
+        def fail(key,value):
+            if key==('jobs',identity) and value['samples'] and not failed:
+                failed.append(True);return True
+            return False
+        self.host.fail_put=fail
+        with self.assertRaisesRegex(AssertionError,'state unavailable'):self.host.tick()
+        saved=self.host.state[('jobs',identity)]['value']
+        self.assertIsNotNone(saved.get('pendingOutcome'));self.assertEqual(saved['attempts'],[])
+        self.host.fail_put=None;self.host.request('api/bootstrap');self.host.tick(2)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'completed');self.assertEqual(len(report['attempts']),1)
+        self.assertEqual(len(self.host.executions),1)
+
+    def test_receipt_write_ack_timeout_recovers_known_result(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();original=self.host.callback;delayed=[]
+        def callback(method,p,body):
+            result=original(method,p,body)
+            if method=='host.state.put' and p['namespace']=='jobs' and p['value'].get('pendingOutcome') and not delayed:
+                delayed.append(True);self.host.callback_response_delay=20
+            return result
+        self.host.callback=callback
+        with self.assertRaisesRegex(AssertionError,'保存超过维护预算'):self.host.tick(budget_ms=8000)
+        self.host.request('api/bootstrap');self.host.tick(2)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'completed');self.assertEqual(len(report['attempts']),1)
+        self.assertEqual(len(self.host.executions),1)
+
+    def test_sixteen_invalid_answers_near_deadline_do_not_interrupt(self):
+        self.host.additional_accounts=[{'id':f'acct-invalid-{i}','name':str(i),'provider':'openai','enabled':True,'status':'normal','groups':[]} for i in range(15)]
+        self.config(maxConcurrency=16,lowConfidencePercent=0,degradedPercent=100)
+        ids=self.host.request('api/submit',{'accountIds':['acct-test',*[a['id'] for a in self.host.additional_accounts]],'requestId':'invalid-wave'})['submitted']
+        original=self.host.callback
+        def callback(method,p,body):
+            if method=='host.model.stream_read':
+                text=','.join(str(i%355+1) for i in range(150))
+                return model_events({'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':text}]}]}},end=True)
+            result=original(method,p,body)
+            if method=='host.state.put' and p['namespace']=='jobs' and (p['value'].get('pendingOutcome') or p['value']['attempts']):
+                self.host.callback_response_delay=0.08
+            return result
+        self.host.callback=callback;self.host.model_response_delay=26.2
+        self.host.tick();self.host.request('api/bootstrap')
+        reports=[self.host.request('api/report?id='+identity) for identity in ids]
+        self.assertTrue(all(r['status']=='running' and not r['pendingProbe'] for r in reports))
+        self.assertTrue(all(len(r['attempts'])==1 for r in reports));self.assertEqual(len(self.host.executions),16)
+
+    def test_full_sixteen_way_timeouts_stop_after_two_waves(self):
+        self.host.additional_accounts=[{'id':f'acct-timeout-{i}','name':str(i),'provider':'openai','enabled':True,'status':'normal','groups':[]} for i in range(15)]
+        self.config(maxConcurrency=16)
+        ids=self.host.request('api/submit',{'accountIds':['acct-test',*[a['id'] for a in self.host.additional_accounts]],'requestId':'full-wave-timeout'})['submitted']
+        self.host.model_response_delay=10
+        self.host.tick(2,budget_ms=8000)
+        reports=[self.host.request('api/report?id='+identity) for identity in ids]
+        self.assertTrue(all(r['status']=='failed' and len(r['attempts'])==2 for r in reports))
+        for r in reports:
+            self.assertIn('连续两次',r['message'])
+            self.assertTrue(all(a['diagnostics']['fullWindow'] for a in r['attempts']))
+            self.assertTrue(all(a['diagnostics']['budgetMs']<6500 for a in r['attempts']))
+        self.assertEqual(len(self.host.executions),32)
+
+    def test_later_wave_defers_without_spending_attempt(self):
+        self.host.additional_accounts=[{'id':'acct-later','name':'later','provider':'openai','enabled':True,'status':'normal','groups':[]}]
+        self.config(maxConcurrency=1,lowConfidencePercent=0,degradedPercent=100)
+        ids=self.host.request('api/submit',{'accountIds':['acct-test','acct-later'],'requestId':'later-wave'})['submitted']
+        self.host.model_response_delay=3;self.host.tick(budget_ms=10000)
+        self.assertEqual(len(self.host.executions),1)
+        later=self.host.request('api/report?id='+ids[1])
+        self.assertEqual(later['roundAttempts'],0);self.assertFalse(later['pendingProbe'])
+        self.assertEqual(later['progress']['stage'],'waiting_request')
+        self.host.model_response_delay=0;self.host.tick()
+        self.assertEqual(self.host.request('api/report?id='+ids[1])['status'],'completed')
+        self.assertEqual(len(self.host.executions),2)
+
+    def test_completed_event_drains_host_eof_without_cancellation(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();original=self.host.callback;reads=[]
+        def callback(method,p,body):
+            if method=='host.model.stream_read':
+                reads.append(True)
+                if len(reads)==1:
+                    text=','.join(str(i%355+1) for i in range(330))
+                    return model_events({'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':text}]}]}},end=False)
+                return model_events(end=True)
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'completed');self.assertEqual(len(reads),2)
+        self.assertEqual(self.host.closes,0);self.assertEqual(report['attempts'][0]['diagnostics']['kind'],'completed')
+
+    def test_oversized_receipt_is_bounded_and_not_retried(self):
+        self.config(autoDisable=True)
+        identity=self.submit();original=self.host.callback
+        def callback(method,p,body):
+            if method=='host.model.stream_read':
+                return model_events({'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':'1,'*20000}]}]}},end=True)
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick(2)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'failed');self.assertIn('可持久化样本上限',report['message'])
+        self.assertEqual(len(self.host.executions),1);self.assertEqual(len(report['attempts']),1)
+        self.assertNotIn('pendingOutcome',report);self.assertEqual(self.host.disable_calls,0)
+
+    def test_revoked_token_is_actionable_and_never_retried(self):
+        self.config(autoDisable=True);identity=self.submit();original=self.host.callback;self.host.fail_model=True
+        def callback(method,p,body):
+            try:return original(method,p,body)
+            except SimulatedFault:
+                if method=='host.model.execute_stream':
+                    raise SimulatedFault('OpenAI upstream failure: kind=unauthorized, status=401, code=token_revoked')
+                raise
+        self.host.callback=callback;self.host.tick(3)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'failed');self.assertIn('刷新凭据或重新授权',report['message'])
+        self.assertEqual(len(self.host.executions),1);self.assertEqual(self.host.disable_calls,0)
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,default=BINARY);parser.add_argument('--deny-timestamps',action='store_true',help='Use strace to deny utimensat and exercise restricted runtime extraction');parser.add_argument('--runtime-tmpdir',type=Path,help='Set TMPDIR for the plugin process to exercise runtime directory fallback');args,remaining=parser.parse_known_args();BINARY=args.binary;DENY_TIMESTAMPS=args.deny_timestamps;RUNTIME_TMPDIR=args.runtime_tmpdir

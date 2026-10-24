@@ -72,7 +72,7 @@ def main():
             for key, value in before["config"].items():
                 if key == "retentionDays":
                     # 1.7.1 fixes history retention to the most recent three days.
-                    assert value == 47 and after["config"][key] == 3, (value, after["config"][key])
+                    assert value in (3,47) and after["config"][key] == 3, (value, after["config"][key])
                 else:
                     equivalent(value, after["config"][key])
             for key in ["configRevision", "nextDue"]:

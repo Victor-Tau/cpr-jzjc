@@ -61,6 +61,7 @@ impl Progress {
         for (id, mut report) in reports {
             report.as_object_mut().unwrap().remove("samples");
             report.as_object_mut().unwrap().remove("challenges");
+            report.as_object_mut().unwrap().remove("pendingOutcome");
             if !["queued", "running"].contains(&report["status"].as_str().unwrap_or("")) {
                 s.phases.remove(&id);
                 self.cancelled.lock().unwrap().remove(&id);

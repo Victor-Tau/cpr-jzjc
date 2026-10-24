@@ -355,6 +355,24 @@ pub struct ProbeDiagnostics {
     #[serde(default)]
     pub partial: bool,
     pub budget_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_budget_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_window: Option<bool>,
+}
+/// 收到的结果先持久化；校验和评分可以在后续回调重放，不重发模型请求。
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeOutcome {
+    pub challenge_id: String,
+    pub expected_count: u32,
+    pub attempt: u32,
+    pub at: u64,
+    pub request_id: Option<String>,
+    pub text: Option<String>,
+    pub error: Option<String>,
+    pub permanent: bool,
+    pub diagnostics: ProbeDiagnostics,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -382,6 +400,8 @@ pub struct Job {
     pub consecutive: u32,
     pub low_retries_used: u32,
     pub pending_probe: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_outcome: Option<ProbeOutcome>,
     pub disable_state: String,
     #[serde(default)]
     pub disable_error: Option<String>,
@@ -438,6 +458,7 @@ impl Job {
         self.message = message.into();
         self.finished_at = Some(now);
         self.pending_probe = false;
+        self.pending_outcome = None;
         self.samples.clear();
         self.challenges.clear();
     }

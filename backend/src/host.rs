@@ -319,6 +319,7 @@ pub async fn execute(
     job: &crate::domain::Job,
     prompt: &str,
     parent_deadline: Option<tokio::time::Instant>,
+    target_window: std::time::Duration,
     progress: std::sync::Arc<crate::progress::Progress>,
 ) -> Result<ExecutionResult, Box<ExecutionError>> {
     let cfg = &job.config;
@@ -387,7 +388,9 @@ pub async fn execute(
                     if w.protocol != "openai" {
                         return Err(fault("模型协议无效"));
                     }
-                    response.wire(w.payload)?;
+                    if response.terminal.is_none() {
+                        response.wire(w.payload)?;
+                    }
                 }
             }
             if last_update.elapsed() >= std::time::Duration::from_millis(250) || state.end {
@@ -402,7 +405,8 @@ pub async fn execute(
             if state.end {
                 stream = None;
             }
-            if state.end || response.terminal.is_some() {
+            // 终止事件不是宿主 EOF；继续读取让会话完成终结，避免成功请求被 close 成取消。
+            if state.end {
                 break;
             }
         }
@@ -428,8 +432,11 @@ pub async fn execute(
         )
         .await;
     }
-    let timed_out = result.is_err();
-    let kind = if timed_out && host_limited {
+    // EOF 收尾超时不能覆盖此前已经收到的确定终止原因。
+    let timed_out = result.is_err() && response.terminal.is_none();
+    let kind = if let Some(terminal) = response.terminal {
+        terminal
+    } else if timed_out && host_limited {
         "host_budget_timeout"
     } else if timed_out {
         "request_timeout"
@@ -444,10 +451,15 @@ pub async fn execute(
         reasoning_bytes: Some(response.reasoning_bytes()),
         partial: kind != "completed",
         budget_ms,
+        target_budget_ms: Some(target_window.as_millis().min(u128::from(u64::MAX)) as u64),
+        full_window: Some(
+            budget_ms
+                .is_none_or(|ms| u128::from(ms) >= target_window.as_millis().saturating_sub(500)),
+        ),
     };
     // Only clean EOF, an output limit, or our own deadline can salvage text.
     // Protocol errors, explicit upstream failures and cancellation stay failures.
-    if (timed_out || matches!(&result, Ok(Ok(()))))
+    if (response.terminal.is_some() || timed_out || matches!(&result, Ok(Ok(()))))
         && !progress.is_cancelled(&job.id)
         && let Some(text) = response.text()
     {
@@ -507,7 +519,11 @@ pub async fn execute(
                 response.received_bytes as f64 / 1024.0
             )
         } else if permanent {
-            "账户认证、Key权限或模型参数被拒绝，请检查宿主日志".into()
+            if lower.contains("token_revoked") || lower.contains("kind=unauthorized") {
+                "上游账户认证失效，请在宿主刷新凭据或重新授权".into()
+            } else {
+                "账户认证、Key权限或模型参数被拒绝，请检查宿主日志".into()
+            }
         } else if lower.contains("429") || lower.contains("rate_limit") {
             "上游限流".into()
         } else if lower.contains("超时") {

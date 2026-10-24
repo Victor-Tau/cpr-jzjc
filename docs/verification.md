@@ -1,56 +1,64 @@
-# v1.7.1 验证记录
+# v1.7.2 验证记录
 
-适配 Codex Proxy RS 3.30.2，修复维护回调取消后的检测停滞，并将检测历史改为保留最近三天。
+修复探针结果在校验、保存和重启恢复时丢失的问题，以及并行批次请求窗口和完成事件关流问题。
 
-适配 Codex Proxy RS `>=3.30.2,<3.31.0`，Linux x86_64，glibc 2.36+。
+适配 Codex Proxy RS `>=3.30.2,<3.31.0`，Linux x86_64，glibc 2.36+。SDK 和打包工具沿用 3.30.2，RPC v5、管理能力 v2、安装包协议 v5 和状态 schema 均保持兼容。
 
-交付文件：`dist/personal.modeltrace-health-1.7.1-x86_64-unknown-linux-gnu.tar.gz`，30,745,300 字节，SHA-256 `5d352d71eee62aef8d55353bb0729755b5b9cd96e04222969b404ce3b19d4084`。
+交付文件：`dist/personal.modeltrace-health-1.7.2-x86_64-unknown-linux-gnu.tar.gz`，30,755,618 字节，SHA-256 `42ab5faee9901af540ab155220c48c307717847531f1485e3208426dbdb71086`。
 
-## 实现要点
+## 实现与边界
 
-- **取消恢复**：维护和管理 RPC 使用取消守卫。处理 future 被宿主或 SDK 丢弃时，下一次调用会强制重新读取持久化状态；已发出但结果未收齐的 `pendingProbe` 标记为 `interrupted`，不永久跳过，也不盲目重发模型请求。未完成的幂等账户操作恢复为 `pending`，下一回调先校验再执行。
-- **预算收尾**：并行批次按并发数预留收尾时间（单任务约 0.3 秒，16 路约 3 秒），先把同批全部探针结果校验并保存，再使用剩余预算评分。评分或保存撞上截止时间时保留已落盘样本，下一回调优先评分，不重发请求。单任务请求窗口约 29 秒，16 路并发约 26.5 秒。
-- **历史保留**：检测历史固定保留最近 3 天，不再限制 500 条；旧配置的 `retentionDays` 在载入和保存时归一化为 3。12 MiB 历史存储保护、单条 256 KiB 上限和任务 manifest 的 2,000 条上限保留。
-- **移组与操作超时**：移组前先读取当前分组，已在目标分组时直接记为完成；移组或关闭调度在回调剩余预算不足时保持 `pending`，下一回调幂等重试，不再误报失败。
-- **前端进度**：使用 `updatedAt` 判断进度是否失效。`receiving` 超过 8 秒无更新显示「进度已过期，等待后台恢复」，其他阶段超过 90 秒无更新也会提示。
-- **宿主适配**：SDK 固定到 Codex Proxy RS 3.30.2 的提交 `76291f448cdf1d1da2027da32b7c949deb998c7a`，打包使用同版 `cpr-plugin`，安装包为协议 v5。UI 组件包升级到 `@codex-proxy/ui` 0.6.0，并使用 `ZConfigProvider` + `zhHans` 保持中文文案。
+- 评分进程完整返回 `ok=false` 表示样本不合格等业务错误，保留该进程；I/O、JSON/`ok` 字段格式错误及调用超时仍销毁并重建进程。
+- 每个探针结果先保存 `pendingOutcome`，绑定挑战 ID、期望数量和尝试序号。同批回执全部保存后再校验，校验后的尝试记录、样本和回执删除通过同一次 CAS 写入。正文限制为 32 KiB，并检查 JSON 编码后的任务大小，超限明确失败而不截断。
+- 保存失败或确认超时使内存状态失效，下次重新读取宿主状态。已保存回执继续校验、已保存样本继续评分，不重发请求、不重复记账。管理报告及实时快照剔除回执正文，任务结束时清理回执。
+- 排队任务和已保存结果可跨进程重启恢复；仅已发出且没有已保存结果的请求标记为中断，避免对不确定请求自动重发。
+- 每批都检查扣除收尾时间后的可用窗口，预算不足时顺延且不消耗尝试。诊断新增可选 `targetBudgetMs`、`fullWindow`，连续两次完整窗口的宿主预算超时按各自批次窗口判定；历史记录缺少新字段时使用兼容判断。
+- 模型完成事件后继续读取宿主 EOF。正常 EOF 不调用 `stream_close`；收尾超时或出错仍保留已确定完成结果，取消优先。
+- `token_revoked`、`kind=unauthorized` 的认证拒绝提示刷新宿主凭据或重新授权，立即停止，不评分、不触发自动停用或移组。
 
-## 构建约束
+数字解析、数量门槛、序列校验、指纹库和评分算法未修改。真正输出不足仍会失败；宿主 30 秒维护预算未改变，插件不能修复已失效的上游凭据。已经结束的旧失败或中断任务不会自动重启。
 
-全部编译命令通过 `taskset -c 0` 绑定到一个 CPU 核心，同时设置 `CARGO_BUILD_JOBS=1`、`RAYON_NUM_THREADS=1`。前端使用 Node 24 和 pnpm 单核构建；发布二进制使用 `cargo zigbuild` 面向 `x86_64-unknown-linux-gnu.2.36`。运行时归档沿用 1.7.0 的私有 Python/NumPy 运行时，未重新下载或改动。
+## 单核构建
 
-单核发布构建耗时 1 分 37 秒；前端生产构建耗时约 2.4 秒，转换 2,158 个模块，`app.js` 215.15 kB。
+所有编译通过 `taskset -c 0` 绑定到 CPU 0，Rust 设置 `CARGO_BUILD_JOBS=1`、`RAYON_NUM_THREADS=1`；前端使用 Node 24 和同一 CPU。发布命令为：
+
+```bash
+taskset -c 0 env CARGO_BUILD_JOBS=1 RAYON_NUM_THREADS=1 \
+  cargo zigbuild --manifest-path backend/Cargo.toml --locked --offline \
+  --release --target x86_64-unknown-linux-gnu.2.36
+```
+
+私有 Python/NumPy 运行时复用经过包摘要及全部资源摘要校验的 1.7.1 安装包，运行时依赖未变。归档 1,303 个文件，展开 90,710,161 字节，SHA-256 `f57f34194ad4dd313bb0942d23d213970b9bba96c1cd4145a94b07db8d4ec37e`。
+
+单核发布构建耗时 3 分 42 秒（含依赖编译）；前端 Vite 构建约 2.5 秒，转换 2,158 个模块，`app.js` 215.20 kB。链接器保留既有 Zig 优化参数弃用提示，构建成功。
+
+## 针对性回归
+
+- 无效样本连续三次校验，实际评分子进程 PID 保持一个，三次仍按原规则报告有效数字不足。
+- 16 路无效回答在 26.2 秒返回，每次回执或尝试写入延迟 80 毫秒；全部结果被保存，没有任务被误标为中断。
+- 分别从原始回执、有效样本保存后的宿主状态启动新进程，完成一次评分，新增模型请求为零。
+- 校验后样本保存失败，重读原始回执后只记一次尝试；回执写入成功但确认延迟超过预算，同样可恢复且不重发。
+- 16 路完整宿主预算超时两次后停止；较短的配置超时仍保留五次尝试规则。
+- 后续批次剩余窗口不足时不发请求，尝试计数不增加；下一回调正常执行。
+- 完成事件后读到 EOF 时没有主动关流；EOF 收尾超时仍保留 `completed` 结果。
+- 超出可保存正文上限明确终止；401 令牌失效立即停止，均不触发自动账户操作。
 
 ## 验证结果
 
 | 验证 | 结果 |
 | --- | --- |
-| Rust 单元测试 | 17 项通过（`cargo test --locked --offline`，单核） |
-| Python 评分单元测试 | 6 项通过（项目私有 Python 环境，含 NumPy） |
-| 静态检查 | `cargo fmt --check`、Clippy `-D warnings`、TypeScript `vue-tsc --noEmit` 通过 |
+| Rust 单元测试 | 17 项通过，`cargo test --locked --offline`，单核 |
+| Python 评分单元测试 | 6 项通过，私有开发环境及 NumPy |
+| 静态检查 | `cargo fmt --check`、Clippy `-D warnings`、`vue-tsc --noEmit` 通过 |
 | 前端生产构建 | Vite 构建通过 |
-| RPC 回归（debug 二进制） | 58 项全部通过，235.9 秒 |
-| RPC 回归（安装包二进制） | 58 项全部通过，284.7 秒 |
-| 安装包校验 | `verify_artifact.py` 通过：SHA-256 附件一致、manifest/协议 v5/资源路径与摘要核对、包内私有 Python/NumPy 离线评分校验、正式二进制实际解包并完成一轮检测评分 |
-| 升级回归 | 1.7.0 → 1.7.1 通过：配置、计划、历史、指纹库和提交去重保留；`retentionDays=47` 归一化为 3；未重发探针 |
-| UI 交互回归 | 通过：账户与历史批量操作、配置、移组重试、报告、移动端/深色主题、实时进度、停顿进度失效提示等；无页面错误 |
+| RPC 回归（安装包二进制） | 68 项全部通过，353.4 秒；比 1.7.1 新增 10 项，原有断言按持久化回执与 EOF 行为更新 |
+| 安装包校验 | 摘要附件、manifest、协议 v5、资源摘要、私有 Python/NumPy 离线评分与实际插件解包检测通过；18 个指纹模型 |
+| 升级回归 | 1.7.1 → 1.7.2 通过：配置、计划、历史、指纹库和提交去重保留，无探针重发 |
+| 受限运行时解包 | RPC 脚本 `--deny-timestamps` 对应用例通过，通过 strace 禁止时间戳系统调用时仍可完成检测评分 |
+| UI 交互回归 | 账户与历史批量操作、配置、报告、分组重试、移动端/深色主题、实时和过期进度等通过；页面错误为空 |
 
-安装包校验输出：`runtimeValidated=true`、`pluginExtractionValidated=true`、指纹库 18 个模型。
-
-## 超时专项验证
-
-- **维护取消恢复**：两路并发时，把第二个账户 `pendingProbe=true` 的状态写入延迟到 8 秒预算之外。维护调用返回超时；下一次回调重新载入状态，两个结果不确定的任务均变为 `interrupted`，`pendingProbe=false`，模型执行次数没有增加。
-- **16 路接近期限完成 + 存储变慢**：16 个账户并发，模型首包响应统一延迟 25 秒，每个样本保存额外延迟 80 毫秒。维护回调在 30 秒内完成；16 个任务均只发起一次请求，全部保存结果并最终完成，没有 `pendingProbe` 残留，也没有重发。该用例覆盖了诊断中的 16 路并发、临期收尾和存储变慢组合。
-- **历史保留**：构造超过 500 条、跨越 3 天边界的历史记录，验证只按时间清理、不按固定条数截断；旧 `retentionDays` 值在升级后归一化为 3。
-- **目标分组幂等**：账户已在目标分组时，维护回调不重复调用更新分组接口，直接完成移组。
-- **慢操作重试**：账户操作跨过回调预算时保留 `pending`，下一回调完成，且不会产生重复宿主更新。
-
-新增或更新的 RPC 用例包括 `test_cancelled_maintenance_recovers_pending_probes`、`test_sixteen_way_wave_finishes_near_deadline_with_slow_storage`、`test_history_keeps_three_days_without_count_limit`、`test_already_in_target_group_skips_redundant_move`、`test_slow_move_defers_to_next_callback_without_duplicate_update`。测试总数由 1.7.0 的 54 项增加到 58 项。
-
-UI 回归在 Playwright 的 Ubuntu 24.04 Chromium 回退构建上执行，包含 `stale receiving progress expires` 检查；页面错误为空。
-
-没有在生产宿主安装插件或发送真实账号检测请求。
+测试使用实际插件二进制与模拟宿主，不发送真实账户模型请求。未在生产宿主安装或切换版本。
 
 ## 历史验证
 
-[1.7.0](verification-v1.7.0.md)、[1.6.1](verification-v1.6.1.md)、[1.6.0](verification-v1.6.0.md)、[1.5.1](verification-v1.5.1.md)、[1.5.0](verification-v1.5.0.md)、[1.4.6](verification-v1.4.6.md)。
+[1.7.1](verification-v1.7.1.md)、[1.7.0](verification-v1.7.0.md)、[1.6.1](verification-v1.6.1.md)、[1.6.0](verification-v1.6.0.md)、[1.5.1](verification-v1.5.1.md)。

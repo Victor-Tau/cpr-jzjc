@@ -227,16 +227,22 @@ impl Engine {
             }
             let v: Value =
                 serde_json::from_slice(&output).map_err(|_| fault("评分输出格式错误"))?;
-            if v["ok"] != true {
-                return Err(fault(v["error"].as_str().unwrap_or("评分失败")));
+            if !v["ok"].is_boolean() {
+                return Err(fault("评分输出格式错误"));
             }
-            serde_json::from_value(v["data"].clone()).map_err(|_| fault("评分数据格式错误"))
+            Ok(v)
         })
         .await;
         match result {
-            Ok(Ok(value)) => {
+            Ok(Ok(reply)) => {
+                // 业务拒绝已完整读完一条响应，不能因此重启健康的 Python/NumPy。
                 self.worker = Some(worker);
-                Ok(value)
+                if reply["ok"] == false {
+                    Err(fault(reply["error"].as_str().unwrap_or("评分失败")))
+                } else {
+                    serde_json::from_value(reply["data"].clone())
+                        .map_err(|_| fault("评分数据格式错误"))
+                }
             }
             other => {
                 let _ = worker.child.kill().await;

@@ -11,4 +11,5 @@ python3 scripts/build_runtime.py "$@"
 python3 scripts/collect_licenses.py
 cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu.2.36
 cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
-python3 scripts/verify_artifact.py dist/personal.modeltrace-health-1.7.1-x86_64-unknown-linux-gnu.tar.gz
+task_version="$(python3 -c 'import json; print(json.load(open("plugin.json"))["version"])')"
+python3 scripts/verify_artifact.py "dist/personal.modeltrace-health-${task_version}-x86_64-unknown-linux-gnu.tar.gz"

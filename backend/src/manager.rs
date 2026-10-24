@@ -57,7 +57,6 @@ pub struct Manager {
     version: Option<u64>,
     pub jobs: Vec<(Job, Option<u64>)>,
     pub loaded: bool,
-    recovered: bool,
     reload_required: Arc<AtomicBool>,
     pub engine: Engine,
     pub progress: Arc<Progress>,
@@ -73,7 +72,6 @@ impl Manager {
             version: None,
             jobs: vec![],
             loaded: false,
-            recovered: false,
             reload_required: Arc::new(AtomicBool::new(false)),
             engine: Engine::new(),
             progress,
@@ -121,6 +119,17 @@ impl Manager {
         self.publish(Some(i));
         Ok(())
     }
+    async fn save_probe_job(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
+        let deadline = self.deadline.ok_or_else(|| fault("维护预算不可用"))?;
+        match tokio::time::timeout_at(deadline, self.save_job(host, i)).await {
+            Ok(result) => result,
+            Err(_) => {
+                // 写入可能已提交，必须重新读取 CAS 版本，不能重用内存中的未确认状态。
+                self.loaded = false;
+                Err(fault("结果保存超过维护预算，下次调度将重新读取已保存状态"))
+            }
+        }
+    }
     pub async fn load(&mut self, host: &HostClient) -> Result<(), PluginFault> {
         // A cancelled RPC future drops the tick without running its error path.
         // The RPC layer raises this flag so the next call re-reads persisted
@@ -145,7 +154,7 @@ impl Manager {
             if let Some(r) = host::state_get(host, "jobs", &id).await? {
                 let mut job: Job =
                     serde_json::from_value(r.value).map_err(|_| fault("历史任务格式错误"))?;
-                if job.active() && (!self.recovered || job.pending_probe) {
+                if job.active() && job.pending_probe && job.pending_outcome.is_none() {
                     job.finish(
                         "interrupted",
                         "inconclusive",
@@ -183,7 +192,6 @@ impl Manager {
         self.control.pending_schedule = None;
         self.save(host).await?;
         self.loaded = true;
-        self.recovered = true;
         Ok(())
     }
     /// Clears execution boundaries left behind by an RPC cancellation. A probe
@@ -195,7 +203,7 @@ impl Manager {
         for i in 0..self.jobs.len() {
             let j = &mut self.jobs[i].0;
             let mut dirty = false;
-            if j.pending_probe {
+            if j.pending_probe && j.pending_outcome.is_none() {
                 j.finish(
                     "interrupted",
                     "inconclusive",
@@ -411,6 +419,7 @@ impl Manager {
                 consecutive: 0,
                 low_retries_used: 0,
                 pending_probe: false,
+                pending_outcome: None,
                 disable_state: "none".into(),
                 disable_error: None,
                 group_state: "none".into(),
@@ -890,7 +899,6 @@ impl Manager {
             return self.save(host).await;
         }
         let mut visited = BTreeSet::new();
-        let mut continuing = false;
         loop {
             // Finish confirmed actions before dispatching another account. A
             // completed action is persisted before the next one starts.
@@ -909,7 +917,6 @@ impl Manager {
                         .map(|d| d - std::time::Duration::from_millis(500)),
                 )
                 .await?;
-                continuing = true;
                 continue;
             }
             if let Some(i) = self
@@ -927,7 +934,6 @@ impl Manager {
                         .map(|d| d - std::time::Duration::from_millis(500)),
                 )
                 .await?;
-                continuing = true;
                 continue;
             }
             if self.remaining() < std::time::Duration::from_secs(6) {
@@ -937,13 +943,19 @@ impl Manager {
             let Some(head) = ready.first().copied() else {
                 break;
             };
-            // A validated sample only needs a fast scoring call before the
-            // round can complete, so grade it before dispatching probes.
-            if !self.jobs[head].0.samples.is_empty() {
+            // 先恢复已落盘的回答/样本，不能为了重新采样丢弃可重放的结果。
+            if self.jobs[head].0.pending_outcome.is_some() || !self.jobs[head].0.samples.is_empty()
+            {
                 visited.insert(head);
                 self.last_job_source = Some(self.jobs[head].0.source.clone());
-                continuing = true;
-                if let Err(e) = self.score_ready(host, head).await {
+                let result = async {
+                    if self.jobs[head].0.pending_outcome.is_some() {
+                        self.validate_probe(host, head).await?;
+                    }
+                    self.score_ready(host, head).await
+                }
+                .await;
+                if let Err(e) = result {
                     if !self.loaded {
                         return Err(e);
                     }
@@ -964,7 +976,7 @@ impl Manager {
             for i in &wave {
                 visited.insert(*i);
                 self.last_job_source = Some(self.jobs[*i].0.source.clone());
-                match self.begin_probe(host, *i, continuing, reserve).await {
+                match self.begin_probe(host, *i, reserve).await {
                     Ok(Some(task)) => {
                         spawned = true;
                         probes.spawn(task.run());
@@ -984,7 +996,7 @@ impl Manager {
             if !spawned {
                 break;
             }
-            let mut sampled = vec![];
+            let mut received = vec![];
             while let Some(completed) = probes.join_next().await {
                 let (id, outcome) = completed.map_err(|_| fault("探针任务异常退出"))?;
                 // Job records are stable during a callback; indices cannot be
@@ -994,11 +1006,13 @@ impl Manager {
                     .iter()
                     .position(|(j, _)| j.id == id)
                     .ok_or_else(|| fault("探针任务返回了未知任务"))?;
-                continuing = true;
-                // Persist every probe outcome before grading any of them so
-                // one slow score cannot strand the rest of a wave at the
-                // maintenance deadline.
-                match self.finish_probe(host, index, outcome).await {
+                // 整批先写入原始结果；Python 校验不能阻塞其余回答的持久化。
+                self.record_probe(host, index, outcome).await?;
+                received.push(index);
+            }
+            let mut sampled = vec![];
+            for index in received {
+                match self.validate_probe(host, index).await {
                     Ok(true) => sampled.push(index),
                     Ok(false) => {}
                     Err(e) => {
@@ -1077,13 +1091,16 @@ impl Manager {
             .iter()
             .enumerate()
             .filter(|(i, (j, _))| {
-                !visited.contains(i) && j.active() && !j.pending_probe && j.next_at <= now()
+                !visited.contains(i)
+                    && j.active()
+                    && (!j.pending_probe || j.pending_outcome.is_some())
+                    && j.next_at <= now()
             })
             .map(|(i, (j, _))| {
                 (
                     i,
                     (
-                        u8::from(j.samples.is_empty()),
+                        u8::from(j.samples.is_empty() && j.pending_outcome.is_none()),
                         u8::from(self.last_job_source.as_deref() == Some(j.source.as_str())),
                         u8::from(j.status != "running"),
                     ),
@@ -1186,7 +1203,7 @@ impl Manager {
             self.progress
                 .phase(&j.id, "waiting_retest", json!({"nextAt":j.next_at}));
         }
-        self.save_job(host, i).await
+        self.save_probe_job(host, i).await
     }
     /// Prepares one account for a model probe and returns the request task.
     /// `Ok(None)` means nothing will be sent this callback: the request was
@@ -1197,7 +1214,6 @@ impl Manager {
         &mut self,
         host: &HostClient,
         i: usize,
-        continuing: bool,
         reserve: std::time::Duration,
     ) -> Result<Option<ProbeTask>, PluginFault> {
         if self.progress.is_cancelled(&self.jobs[i].0.id) {
@@ -1232,28 +1248,22 @@ impl Manager {
             self.prepare_score(host, i).await?;
             self.save_job(host, i).await?;
         }
-        // Cold extraction/preparation must not silently shorten the very
-        // first probes of a callback. Yield without sending or consuming a
-        // retry attempt when the remaining window cannot hold the request.
-        if !continuing {
-            let request_window = self.request_window.saturating_sub(reserve);
-            let desired = if self.jobs[i].0.config.timeout_seconds == 0 {
-                request_window
-            } else {
-                request_window.min(std::time::Duration::from_secs(
-                    self.jobs[i].0.config.timeout_seconds,
-                ))
-            };
-            let available = self
-                .remaining()
-                .saturating_sub(std::time::Duration::from_millis(600));
-            if available < desired.saturating_sub(std::time::Duration::from_millis(500)) {
-                self.jobs[i].0.message = "准备完成，等待下一次调度发起请求".into();
-                self.progress
-                    .phase(&self.jobs[i].0.id, "waiting_request", json!({}));
-                self.save_job(host, i).await?;
-                return Ok(None);
-            }
+        // 每一波都比较扣除收尾后的实际窗口，顺延不消耗采样尝试。
+        let request_window = self.request_window.saturating_sub(reserve);
+        let desired = if self.jobs[i].0.config.timeout_seconds == 0 {
+            request_window
+        } else {
+            request_window.min(std::time::Duration::from_secs(
+                self.jobs[i].0.config.timeout_seconds,
+            ))
+        };
+        let available = self.remaining().saturating_sub(reserve);
+        if available < desired.saturating_sub(std::time::Duration::from_millis(500)) {
+            self.jobs[i].0.message = "准备完成，等待下一次调度发起请求".into();
+            self.progress
+                .phase(&self.jobs[i].0.id, "waiting_request", json!({}));
+            self.save_probe_job(host, i).await?;
+            return Ok(None);
         }
         let challenge = self.jobs[i].0.challenges[self.jobs[i].0.samples.len()].clone();
         self.check_identity(host, i).await?;
@@ -1267,86 +1277,147 @@ impl Manager {
             prompt: challenge.prompt,
             host: host.clone(),
             deadline: self.deadline.map(|d| d.checked_sub(reserve).unwrap_or(d)),
+            target_window: desired,
             progress: self.progress.clone(),
         }))
     }
-    /// Consumes one probe outcome: records the attempt, validates a received
-    /// answer and updates the job. Returns whether a validated sample now
-    /// waits for scoring.
-    async fn finish_probe(
+    /// 先保存可重放回执，避免校验进程或回调被取消时丢失已收到的回答。
+    async fn record_probe(
         &mut self,
         host: &HostClient,
         i: usize,
         result: Result<ExecutionResult, Box<ExecutionError>>,
-    ) -> Result<bool, PluginFault> {
+    ) -> Result<(), PluginFault> {
+        let j = &mut self.jobs[i].0;
+        let challenge = &j.challenges[j.samples.len()];
+        let (request_id, text, error, permanent, diagnostics) = match result {
+            Ok(result) => (
+                Some(result.request_id),
+                Some(result.text),
+                None,
+                false,
+                result.diagnostics,
+            ),
+            Err(error) => (
+                error.request_id,
+                None,
+                Some(error.message),
+                error.permanent,
+                error.diagnostics,
+            ),
+        };
+        j.pending_outcome = Some(ProbeOutcome {
+            challenge_id: challenge.id.clone(),
+            expected_count: challenge.expected_count,
+            attempt: j.round_attempts,
+            at: now(),
+            request_id,
+            text,
+            error,
+            permanent,
+            diagnostics,
+        });
+        j.pending_probe = false;
+        j.message = "已保存回答，等待校验".into();
+        // JSON 转义也计入 250KB 存储限制；超限是明确失败，不能静默截断样本。
+        if j.pending_outcome
+            .as_ref()
+            .and_then(|o| o.text.as_ref())
+            .is_some_and(|text| text.len() > 32768)
+            || serde_json::to_vec(j).unwrap().len() > 240000
+        {
+            let outcome = j.pending_outcome.as_mut().unwrap();
+            outcome.text = None;
+            outcome.error = Some("模型回答超过可持久化样本上限，请减少输出长度".into());
+            outcome.permanent = true;
+        }
+        self.progress.phase(&j.id, "waiting_validation", json!({}));
+        self.save_probe_job(host, i).await
+    }
+    /// 只消费已持久化回执；尝试记录、样本与回执消费通过同一次 CAS 保存。
+    async fn validate_probe(&mut self, host: &HostClient, i: usize) -> Result<bool, PluginFault> {
+        let Some(outcome) = self.jobs[i].0.pending_outcome.clone() else {
+            return Ok(false);
+        };
         if self.progress.is_cancelled(&self.jobs[i].0.id) {
-            let request_id = match result {
-                Ok(result) => Some(result.request_id),
-                Err(error) => error.request_id,
-            };
             self.jobs[i].0.attempts.push(Attempt {
-                request_id,
-                at: now(),
+                request_id: outcome.request_id,
+                at: outcome.at,
                 error: Some("管理员取消检测".into()),
-                diagnostics: None,
+                diagnostics: Some(outcome.diagnostics),
             });
             self.jobs[i].0.pending_probe = false;
             self.jobs[i]
                 .0
                 .finish("cancelled", "inconclusive", "管理员取消检测", now());
-            return self.save_job(host, i).await.map(|()| false);
+            return self.save_probe_job(host, i).await.map(|()| false);
+        }
+        let j = &self.jobs[i].0;
+        if outcome.attempt != j.round_attempts
+            || j.challenges.get(j.samples.len()).is_none_or(|c| {
+                c.id != outcome.challenge_id || c.expected_count != outcome.expected_count
+            })
+        {
+            return Err(fault("探针回执与任务轮次不一致"));
+        }
+        if outcome.text.is_some() && self.remaining() < std::time::Duration::from_millis(350) {
+            self.progress.phase(&j.id, "waiting_validation", json!({}));
+            return Ok(false);
         }
         self.progress
             .phase(&self.jobs[i].0.id, "validating", json!({}));
-        let mut permanent = false;
-        let diagnostics;
-        let (request_id, numbers, error) = match result {
-            Ok(result) => {
-                let challenge = &self.jobs[i].0.challenges[self.jobs[i].0.samples.len()];
-                let partial = result.diagnostics.partial;
-                diagnostics = Some(result.diagnostics);
-                match self.engine.call::<_, Vec<u32>>(
-                    json!({"op":"sample","text":result.text,"expectedCount":challenge.expected_count}),
-                ).await {
-                    Ok(n) => (Some(result.request_id), Some(n), None),
-                    Err(e) => (Some(result.request_id), None, Some(if partial {
-                        format!("部分结果未通过样本校验：{}", e.message)
-                    } else { e.message })),
+        let (numbers, error) = if let Some(text) = &outcome.text {
+            let validation = self.engine.call::<_, Vec<u32>>(
+                json!({"op":"sample","text":text,"expectedCount":outcome.expected_count}),
+            );
+            let deadline = self.deadline.unwrap() - std::time::Duration::from_millis(200);
+            match tokio::time::timeout_at(deadline, validation).await {
+                Ok(Ok(numbers)) => (Some(numbers), None),
+                Ok(Err(error)) => (
+                    None,
+                    Some(if outcome.diagnostics.partial {
+                        format!("部分结果未通过样本校验：{}", error.message)
+                    } else {
+                        error.message
+                    }),
+                ),
+                Err(_) => {
+                    self.progress
+                        .phase(&self.jobs[i].0.id, "waiting_validation", json!({}));
+                    return Ok(false);
                 }
             }
-            Err(e) => {
-                permanent = e.permanent;
-                diagnostics = Some(e.diagnostics);
-                (e.request_id, None, Some(e.message))
-            }
+        } else {
+            (None, outcome.error)
         };
         let full_window_ms = self.request_window.as_millis().saturating_sub(500);
         let full_budget_timeout = |d: &ProbeDiagnostics| {
             d.kind == "host_budget_timeout"
-                && d.budget_ms
-                    .is_some_and(|ms| u128::from(ms) >= full_window_ms)
+                && d.full_window.unwrap_or_else(|| {
+                    d.budget_ms
+                        .is_some_and(|ms| u128::from(ms) >= full_window_ms)
+                })
         };
-        let challenge_expected =
-            self.jobs[i].0.challenges[self.jobs[i].0.samples.len()].expected_count;
         let j = &mut self.jobs[i].0;
-        let repeated_budget_timeout = diagnostics.as_ref().is_some_and(full_budget_timeout)
+        let repeated_budget_timeout = full_budget_timeout(&outcome.diagnostics)
             && j.attempts
                 .last()
                 .filter(|a| a.error.is_some())
                 .and_then(|a| a.diagnostics.as_ref())
                 .is_some_and(full_budget_timeout);
         j.pending_probe = false;
+        j.pending_outcome = None;
         j.attempts.push(Attempt {
-            request_id,
-            at: now(),
+            request_id: outcome.request_id,
+            at: outcome.at,
             error: error.clone(),
-            diagnostics,
+            diagnostics: Some(outcome.diagnostics),
         });
         let sampled;
         if let Some(numbers) = numbers {
             j.samples.push(Sample {
                 numbers,
-                expected_count: challenge_expected,
+                expected_count: outcome.expected_count,
             });
             j.message = if j
                 .attempts
@@ -1360,7 +1431,7 @@ impl Manager {
             }
             .into();
             sampled = true;
-        } else if permanent || repeated_budget_timeout || j.round_attempts >= 5 {
+        } else if outcome.permanent || repeated_budget_timeout || j.round_attempts >= 5 {
             j.finish(
                 "failed",
                 "inconclusive",
@@ -1382,7 +1453,7 @@ impl Manager {
                 .phase(&j.id, "waiting_retry", json!({"nextAt":j.next_at}));
             sampled = false;
         }
-        self.save_job(host, i).await?;
+        self.save_probe_job(host, i).await?;
         Ok(sampled)
     }
 }
@@ -1395,6 +1466,7 @@ struct ProbeTask {
     prompt: String,
     host: HostClient,
     deadline: Option<tokio::time::Instant>,
+    target_window: std::time::Duration,
     progress: Arc<Progress>,
 }
 impl ProbeTask {
@@ -1404,6 +1476,7 @@ impl ProbeTask {
             &self.job,
             &self.prompt,
             self.deadline,
+            self.target_window,
             self.progress,
         )
         .await;

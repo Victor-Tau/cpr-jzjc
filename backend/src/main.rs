@@ -145,6 +145,7 @@ async fn handle(
             let mut value = serde_json::to_value(j).unwrap();
             value.as_object_mut().unwrap().remove("samples");
             value.as_object_mut().unwrap().remove("challenges");
+            value.as_object_mut().unwrap().remove("pendingOutcome");
             Ok(value)
         }
         ("POST", "api/config") => {
