@@ -8,7 +8,13 @@ use crate::{
 use gateway_plugin_sdk::{PluginFault, client::HostClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::task::JoinSet;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -52,6 +58,7 @@ pub struct Manager {
     pub jobs: Vec<(Job, Option<u64>)>,
     pub loaded: bool,
     recovered: bool,
+    reload_required: Arc<AtomicBool>,
     pub engine: Engine,
     pub progress: Arc<Progress>,
     deadline: Option<tokio::time::Instant>,
@@ -67,6 +74,7 @@ impl Manager {
             jobs: vec![],
             loaded: false,
             recovered: false,
+            reload_required: Arc::new(AtomicBool::new(false)),
             engine: Engine::new(),
             progress,
             deadline: None,
@@ -74,6 +82,11 @@ impl Manager {
             last_job_source: None,
             score_bank: None,
         }
+    }
+    /// Shared with the RPC layer so an interrupted maintenance callback can
+    /// force a clean reload on the next management or maintenance call.
+    pub fn reload_flag(&self) -> Arc<AtomicBool> {
+        self.reload_required.clone()
     }
     pub async fn save(&mut self, host: &HostClient) -> Result<(), PluginFault> {
         self.version =
@@ -109,9 +122,14 @@ impl Manager {
         Ok(())
     }
     pub async fn load(&mut self, host: &HostClient) -> Result<(), PluginFault> {
-        if self.loaded {
+        // A cancelled RPC future drops the tick without running its error path.
+        // The RPC layer raises this flag so the next call re-reads persisted
+        // state instead of trusting in-memory mutations that never reached the
+        // host.
+        if self.loaded && !self.reload_required.swap(false, Ordering::SeqCst) {
             return Ok(());
         }
+        self.loaded = false;
         self.jobs.clear();
         if let Some(r) = host::state_get(host, "control", "main").await? {
             self.control =
@@ -121,6 +139,8 @@ impl Manager {
             self.control = Control::default();
             self.version = None;
         }
+        // 1.7.1 起历史固定保留最近三天；旧配置中的天数在载入时归一化。
+        self.control.config.retention_days = HISTORY_RETENTION_DAYS;
         for id in self.control.job_ids.clone() {
             if let Some(r) = host::state_get(host, "jobs", &id).await? {
                 let mut job: Job =
@@ -129,7 +149,7 @@ impl Manager {
                     job.finish(
                         "interrupted",
                         "inconclusive",
-                        "插件或宿主已重启或探针中断；请重新检测",
+                        "上一次探针执行被中断，结果不确定；请重新检测",
                         now(),
                     );
                 }
@@ -164,6 +184,44 @@ impl Manager {
         self.save(host).await?;
         self.loaded = true;
         self.recovered = true;
+        Ok(())
+    }
+    /// Clears execution boundaries left behind by an RPC cancellation. A probe
+    /// whose outcome was never collected is marked interrupted instead of
+    /// remaining pending and being skipped forever; idempotent account actions
+    /// return to pending so the next callback can verify and retry them.
+    async fn recover_interrupted(&mut self, host: &HostClient) -> Result<(), PluginFault> {
+        let mut changed = vec![];
+        for i in 0..self.jobs.len() {
+            let j = &mut self.jobs[i].0;
+            let mut dirty = false;
+            if j.pending_probe {
+                j.finish(
+                    "interrupted",
+                    "inconclusive",
+                    "上一次探针执行被中断，结果不确定；请重新检测",
+                    now(),
+                );
+                dirty = true;
+            }
+            if j.disable_state == "attempting" {
+                j.disable_state = "pending".into();
+                j.disable_error = None;
+                dirty = true;
+            }
+            if j.group_state == "attempting" {
+                j.group_state = "pending".into();
+                j.group_error = None;
+                dirty = true;
+            }
+            if dirty {
+                j.action_message();
+                changed.push(i);
+            }
+        }
+        for i in changed {
+            self.save_job(host, i).await?;
+        }
         Ok(())
     }
     pub fn bank(&self, hash: &str) -> Result<Bank, PluginFault> {
@@ -211,12 +269,13 @@ impl Manager {
     pub async fn set_config(
         &mut self,
         host: &HostClient,
-        config: Config,
+        mut config: Config,
         revision: u64,
     ) -> Result<(), PluginFault> {
         if revision != self.control.config_revision {
             return Err(fault("配置已由其他页面更新，请刷新后重试"));
         }
+        config.retention_days = HISTORY_RETENTION_DAYS;
         config
             .validate(
                 &self
@@ -322,12 +381,6 @@ impl Manager {
             selected.push((existing, Some(a.clone())));
         }
         self.prune(host).await?;
-        let new_count = selected.iter().filter(|(_, a)| a.is_some()).count();
-        if self.jobs.len() + new_count > 500 {
-            return Err(fault(
-                "任务数量达到500条上限，请删除部分历史或等待保留期清理",
-            ));
-        }
         let mut submitted = vec![];
         for (id, account) in selected {
             submitted.push(id.clone());
@@ -444,7 +497,8 @@ impl Manager {
         Ok(json!({"deleted":deleted.len(),"skipped":skipped}))
     }
     async fn prune(&mut self, host: &HostClient) -> Result<(), PluginFault> {
-        let cutoff = now().saturating_sub(u64::from(self.control.config.retention_days) * 86400000);
+        // 历史固定保留最近三天，不设条数上限；存储预算仍是宿主的最终约束。
+        let cutoff = now().saturating_sub(u64::from(HISTORY_RETENTION_DAYS) * 86400000);
         let mut bytes: usize = self
             .jobs
             .iter()
@@ -458,9 +512,6 @@ impl Manager {
             {
                 bytes = bytes.saturating_sub(serde_json::to_vec(j).unwrap().len());
                 removed.push(j.id.clone());
-                if removed.len() >= 20 {
-                    break;
-                }
             }
         }
         if !removed.is_empty() {
@@ -686,9 +737,18 @@ impl Manager {
             Ok(())
         };
         let result = match deadline {
-            Some(deadline) => tokio::time::timeout_at(deadline, action)
-                .await
-                .unwrap_or_else(|_| Err(fault("关闭调度操作超时，请重试以校验账户状态"))),
+            Some(deadline) => match tokio::time::timeout_at(deadline, action).await {
+                Ok(result) => result,
+                Err(_) => {
+                    // Disabling is idempotent; defer to the next callback
+                    // instead of surfacing a false failure when the budget
+                    // was already exhausted.
+                    self.jobs[i].0.disable_state = "pending".into();
+                    self.jobs[i].0.disable_error = None;
+                    self.jobs[i].0.action_message();
+                    return self.save_job(host, i).await;
+                }
+            },
             None => action.await,
         };
         match result {
@@ -719,20 +779,23 @@ impl Manager {
         self.save_job(host, i).await?;
         let action = async {
             let j = &self.jobs[i].0;
+            let target = vec![j.config.target_group_id.clone()];
+            // Re-detection of an account that already sits in the target group
+            // is a no-op. Check membership first so a late callback does not
+            // spend its remaining budget on redundant identity/update calls.
+            if host::account_groups(host, &j.account_id).await? == target {
+                return Ok(());
+            }
             Self::validate_target_group(host, &j.config).await?;
             Self::action_account(host, j).await?;
-            let target = vec![j.config.target_group_id.clone()];
-            if host::account_groups(host, &j.account_id).await? != target {
-                // Replace memberships without changing enabled or other account settings.
-                Self::action_account(host, j).await?;
-                host::admin(
-                    host,
-                    "POST",
-                    "/api/admin/accounts/batch-update",
-                    Some(json!({"accountIds":[j.account_id],"groupIds":target})),
-                )
-                .await?;
-            }
+            // Replace memberships without changing enabled or other account settings.
+            host::admin(
+                host,
+                "POST",
+                "/api/admin/accounts/batch-update",
+                Some(json!({"accountIds":[j.account_id],"groupIds":target})),
+            )
+            .await?;
             Self::action_account(host, j).await?;
             if host::account_groups(host, &j.account_id).await? != target {
                 return Err(fault("账户移组后校验未通过"));
@@ -740,9 +803,18 @@ impl Manager {
             Ok(())
         };
         let result = match deadline {
-            Some(deadline) => tokio::time::timeout_at(deadline, action)
-                .await
-                .unwrap_or_else(|_| Err(fault("移组操作超时，请重试以校验账户状态"))),
+            Some(deadline) => match tokio::time::timeout_at(deadline, action).await {
+                Ok(result) => result,
+                Err(_) => {
+                    // The update is idempotent and membership is re-read on
+                    // retry. Keep the action pending rather than reporting a
+                    // failure when this callback simply ran out of budget.
+                    self.jobs[i].0.group_state = "pending".into();
+                    self.jobs[i].0.group_error = None;
+                    self.jobs[i].0.action_message();
+                    return self.save_job(host, i).await;
+                }
+            },
             None => action.await,
         };
         match result {
@@ -768,6 +840,7 @@ impl Manager {
                 + budget.saturating_sub(std::time::Duration::from_millis(400)),
         );
         self.load(host).await?;
+        self.recover_interrupted(host).await?;
         self.prune(host).await?;
         for i in 0..self.jobs.len() {
             if self.jobs[i].0.active() && self.progress.is_cancelled(&self.jobs[i].0.id) {
@@ -826,6 +899,9 @@ impl Manager {
                 .iter()
                 .position(|(j, _)| j.disable_state == "pending")
             {
+                if self.remaining() < std::time::Duration::from_secs(6) {
+                    break;
+                }
                 self.disable_before(
                     host,
                     i,
@@ -841,6 +917,9 @@ impl Manager {
                 .iter()
                 .position(|(j, _)| j.group_state == "pending")
             {
+                if self.remaining() < std::time::Duration::from_secs(6) {
+                    break;
+                }
                 self.move_group_before(
                     host,
                     i,
@@ -879,12 +958,13 @@ impl Manager {
             // its own account route, so one maintenance callback can advance
             // the first round of up to N accounts simultaneously.
             let wave: Vec<usize> = ready.into_iter().take(self.concurrency()).collect();
+            let reserve = self.effective_reserve(Self::finish_reserve(wave.len()));
             let mut probes = JoinSet::new();
             let mut spawned = false;
             for i in &wave {
                 visited.insert(*i);
                 self.last_job_source = Some(self.jobs[*i].0.source.clone());
-                match self.begin_probe(host, *i, continuing).await {
+                match self.begin_probe(host, *i, continuing, reserve).await {
                     Ok(Some(task)) => {
                         spawned = true;
                         probes.spawn(task.run());
@@ -904,6 +984,7 @@ impl Manager {
             if !spawned {
                 break;
             }
+            let mut sampled = vec![];
             while let Some(completed) = probes.join_next().await {
                 let (id, outcome) = completed.map_err(|_| fault("探针任务异常退出"))?;
                 // Job records are stable during a callback; indices cannot be
@@ -914,8 +995,12 @@ impl Manager {
                     .position(|(j, _)| j.id == id)
                     .ok_or_else(|| fault("探针任务返回了未知任务"))?;
                 continuing = true;
-                let sampled = match self.finish_probe(host, index, outcome).await {
-                    Ok(sampled) => sampled,
+                // Persist every probe outcome before grading any of them so
+                // one slow score cannot strand the rest of a wave at the
+                // maintenance deadline.
+                match self.finish_probe(host, index, outcome).await {
+                    Ok(true) => sampled.push(index),
+                    Ok(false) => {}
                     Err(e) => {
                         if !self.loaded {
                             return Err(e);
@@ -924,20 +1009,21 @@ impl Manager {
                             .0
                             .finish("failed", "inconclusive", e.message, now());
                         self.save_job(host, index).await?;
-                        false
                     }
-                };
-                if sampled {
-                    // Grade within the same callback whenever the budget allows.
-                    if let Err(e) = self.score_ready(host, index).await {
-                        if !self.loaded {
-                            return Err(e);
-                        }
-                        self.jobs[index]
-                            .0
-                            .finish("failed", "inconclusive", e.message, now());
-                        self.save_job(host, index).await?;
+                }
+            }
+            for index in sampled {
+                // The sample is already persisted at this point. If scoring
+                // cannot finish before the deadline it records waiting_score
+                // and the next callback retries without another model request.
+                if let Err(e) = self.score_ready(host, index).await {
+                    if !self.loaded {
+                        return Err(e);
                     }
+                    self.jobs[index]
+                        .0
+                        .finish("failed", "inconclusive", e.message, now());
+                    self.save_job(host, index).await?;
                 }
             }
         }
@@ -968,6 +1054,19 @@ impl Manager {
     }
     fn concurrency(&self) -> usize {
         self.control.config.max_concurrency.max(1) as usize
+    }
+    /// Leave room at the end of the callback to persist every result in a
+    /// parallel wave before the host cancels the maintenance RPC. Larger waves
+    /// need more time for validation and per-job state writes.
+    fn finish_reserve(wave: usize) -> std::time::Duration {
+        let extra = u64::try_from(wave.saturating_sub(1)).unwrap_or(15) * 180;
+        std::time::Duration::from_millis((300 + extra).min(3000))
+    }
+    fn effective_reserve(&self, requested: std::time::Duration) -> std::time::Duration {
+        requested.min(
+            self.remaining()
+                .saturating_sub(std::time::Duration::from_secs(1)),
+        )
     }
     fn ready_queue(&self, visited: &BTreeSet<usize>) -> Vec<usize> {
         // Alternate ready sources; each job gets at most one round or failed
@@ -1099,6 +1198,7 @@ impl Manager {
         host: &HostClient,
         i: usize,
         continuing: bool,
+        reserve: std::time::Duration,
     ) -> Result<Option<ProbeTask>, PluginFault> {
         if self.progress.is_cancelled(&self.jobs[i].0.id) {
             self.jobs[i]
@@ -1136,10 +1236,11 @@ impl Manager {
         // first probes of a callback. Yield without sending or consuming a
         // retry attempt when the remaining window cannot hold the request.
         if !continuing {
+            let request_window = self.request_window.saturating_sub(reserve);
             let desired = if self.jobs[i].0.config.timeout_seconds == 0 {
-                self.request_window
+                request_window
             } else {
-                self.request_window.min(std::time::Duration::from_secs(
+                request_window.min(std::time::Duration::from_secs(
                     self.jobs[i].0.config.timeout_seconds,
                 ))
             };
@@ -1165,9 +1266,7 @@ impl Manager {
             job: self.jobs[i].0.clone(),
             prompt: challenge.prompt,
             host: host.clone(),
-            deadline: self
-                .deadline
-                .map(|d| d - std::time::Duration::from_millis(600)),
+            deadline: self.deadline.map(|d| d.checked_sub(reserve).unwrap_or(d)),
             progress: self.progress.clone(),
         }))
     }

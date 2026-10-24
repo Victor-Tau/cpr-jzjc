@@ -92,9 +92,10 @@ try {
   await page.getByRole('option',{name:'pro',exact:true}).click()
   await page.keyboard.press('Escape')
   await page.getByRole('listbox').waitFor({state:'hidden'})
-  for(const [label,value] of [['低置信度复测阈值（%）','20'],['降智判定阈值（%）','90'],['连续确认轮数','1'],['低置信度额外复测次数','1'],['复测与失败重试间隔（秒）','10'],['历史保留（天）','30']]) {
+  for(const [label,value] of [['低置信度复测阈值（%）','20'],['降智判定阈值（%）','90'],['连续确认轮数','1'],['低置信度额外复测次数','1'],['复测与失败重试间隔（秒）','10']]) {
     assert.equal(await page.getByRole('spinbutton',{name:new RegExp('^'+label.replace(/[()%]/g,'\\$&'))}).inputValue(),value)
   }
+  await page.getByText('自动保存最近3天',{exact:false}).waitFor()
   await page.getByLabel('确认降智后自动关闭该账户调度',{exact:true}).locator('..').click()
   await page.getByLabel('确认降智后移入指定分组',{exact:true}).locator('..').click()
   await page.getByLabel('降智目标分组',{exact:true}).click()
@@ -207,6 +208,18 @@ try {
   await page.locator('.live-progress').filter({hasText:'正在接收回答'}).waitFor({timeout:2500})
   assert.match(await page.locator('.live-progress').innerText(),/正文 0\.5 KB/)
   assert.doesNotMatch(await page.locator('.live-progress').innerText(),/推理/)
+  await page.evaluate(()=>{
+    const f=window.__fixture,p=f.bootstrap.jobs[0].progress
+    p.updatedAt=Date.now()-10000;f.report.progress.updatedAt=p.updatedAt
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.locator('.live-progress').filter({hasText:'进度已过期'}).waitFor({timeout:2500})
+  await page.evaluate(()=>{
+    const f=window.__fixture,p=f.bootstrap.jobs[0].progress
+    p.updatedAt=Date.now();f.report.progress.updatedAt=p.updatedAt
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.locator('.live-progress').filter({hasText:'正在接收回答'}).waitFor({timeout:2500})
   assert.match(await nextRunText(),/下次检测 —/)
   assert.match(await page.locator('.detection-source').innerText(),/（手动）/)
   // A newer automatic result must not hide an active manual task from deduplication.
@@ -345,5 +358,5 @@ try {
   await assertNoUsage()
   assert.deepEqual(errors,[])
   for(const path of ['api/submit','api/models','api/config','api/banks/check','api/banks/apply','api/banks/rollback','api/report','api/config/preview','api/retry-group'])assert(paths.includes(path),path)
-  console.log(JSON.stringify({ui:'passed',checks:['usage display and polling removed','unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','history select all and batch delete','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','scheduled subscription multi-select','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
+  console.log(JSON.stringify({ui:'passed',checks:['usage display and polling removed','unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','history select all and batch delete','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','scheduled subscription multi-select','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','stale receiving progress expires','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
 } finally {await browser.close()}

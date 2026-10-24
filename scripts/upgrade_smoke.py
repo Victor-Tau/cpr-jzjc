@@ -70,7 +70,11 @@ def main():
             replay = current.request("api/submit", {"accountIds": ["acct-test"], "requestId": "actual-upgrade"})
             assert replay["submitted"] == [identity], "upgrade must retain submission idempotency"
             for key, value in before["config"].items():
-                equivalent(value, after["config"][key])
+                if key == "retentionDays":
+                    # 1.7.1 fixes history retention to the most recent three days.
+                    assert value == 47 and after["config"][key] == 3, (value, after["config"][key])
+                else:
+                    equivalent(value, after["config"][key])
             for key in ["configRevision", "nextDue"]:
                 assert after[key] == before[key], key
             assert not after["config"]["autoMoveGroup"]

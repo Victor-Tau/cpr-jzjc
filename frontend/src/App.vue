@@ -100,6 +100,9 @@ function progressText(j: Job | Report) {
   const labels: Record<string,string>={preparing:'正在准备挑战',requesting:'正在发送请求',waiting_response:'等待模型响应',receiving:'正在接收回答',validating:'正在校验样本',waiting_score:'已获得有效样本，等待评分',scoring:'正在分析结果',waiting_retry:'等待重试',waiting_retest:'等待复测',cancelling:'正在取消检测',waiting_request:'准备完成，等待发起请求'}
   const remaining=p.detail.nextAt ? Math.max(0,Math.ceil((p.detail.nextAt-clock.value)/1000)) : 0
   if (p.stage==='waiting_retry' || p.stage==='waiting_retest') return `${j.message || labels[p.stage]}${j.roundAttempts ? `（本轮已尝试 ${j.roundAttempts}/5 次）` : ''} · ${remaining>0 ? `${remaining} 秒后可执行` : '等待调度'}`
+  const stale=Math.max(0,Math.floor((clock.value-(p.updatedAt || p.stageStartedAt))/1000))
+  if (p.stage==='receiving' && stale>=8) return `进度已过期（${stale} 秒未更新），等待后台恢复`
+  if (stale>=90) return `进度长时间未更新（${stale} 秒），等待后台恢复`
   const elapsed=Math.max(0,Math.floor((clock.value-p.stageStartedAt)/1000))
   const d=p.detail
   const traffic=d.outputBytes != null ? ` · 正文 ${(d.outputBytes/1024).toFixed(1)} KB` : d.receivedBytes ? ` · 流数据 ${(d.receivedBytes/1024).toFixed(1)} KB` : ''

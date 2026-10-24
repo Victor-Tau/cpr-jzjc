@@ -10,8 +10,25 @@ use gateway_plugin_sdk::{
     client::{Empty, PluginBuilder, PluginSession, SessionConfig, TypedCall, TypedReply, methods},
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::Mutex;
+
+/// Marks persisted state as authoritative when the host cancels a maintenance
+/// callback before the tick future can run its own error handling.
+struct ReloadOnCancel {
+    flag: Arc<AtomicBool>,
+    armed: bool,
+}
+impl Drop for ReloadOnCancel {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
 
 fn cancel_source(body: &Value) -> Result<Option<&str>, PluginFault> {
     match body.get("source").filter(|value| !value.is_null()) {
@@ -239,13 +256,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("插件握手身份不匹配".into());
     }
     let progress = Arc::new(progress::Progress::new());
-    let manager = Arc::new(Mutex::new(manager::Manager::new(progress.clone())));
+    let manager = manager::Manager::new(progress.clone());
+    let reload_signal = manager.reload_flag();
+    let manager = Arc::new(Mutex::new(manager));
     let background = manager.clone();
     let shutdown = manager.clone();
+    let management_reload = reload_signal.clone();
     let plugin = PluginBuilder::from_json(include_bytes!("../../plugin.json"))?
         .management(registration(), move |call| {
             let manager = manager.clone();
             let progress = progress.clone();
+            let reload_signal = management_reload.clone();
             async move {
                 let query = |key: &str| {
                     url::form_urlencoded::parse(call.request.query.as_bytes())
@@ -273,9 +294,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }) {
                             Ok(source) => {
                                 if let Ok(mut m) = manager.try_lock() {
-                                    m.cancel(&call.host, body["id"].as_str(), source)
+                                    let mut guard = ReloadOnCancel {
+                                        flag: reload_signal.clone(),
+                                        armed: true,
+                                    };
+                                    let result = m
+                                        .cancel(&call.host, body["id"].as_str(), source)
                                         .await
-                                        .map(|()| json!({"ok":true}))
+                                        .map(|()| json!({"ok":true}));
+                                    guard.armed = false;
+                                    if result.is_err() {
+                                        m.loaded = false;
+                                    }
+                                    result
                                 } else {
                                     Ok(json!({"ok":true}))
                                 }
@@ -286,7 +317,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else {
                     let mut m = manager.lock().await;
+                    let mut guard = ReloadOnCancel {
+                        flag: reload_signal.clone(),
+                        armed: true,
+                    };
                     let result = handle(&mut m, call).await;
+                    guard.armed = false;
                     if result.is_err() {
                         m.loaded = false;
                     }
@@ -306,17 +342,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?
         .on(methods::RECONCILE, move |call| {
             let manager = background.clone();
+            let reload_signal = reload_signal.clone();
             async move {
-                if let Ok(mut m) = manager.try_lock()
-                    && let Err(e) = m
+                if let Ok(mut m) = manager.try_lock() {
+                    let mut guard = ReloadOnCancel {
+                        flag: reload_signal,
+                        armed: true,
+                    };
+                    let result = m
                         .tick(
                             &call.host,
                             std::time::Duration::from_millis(call.context.timeout_ms),
                         )
-                        .await
-                {
-                    m.loaded = false;
-                    return Err(e);
+                        .await;
+                    guard.armed = false;
+                    if let Err(e) = result {
+                        m.loaded = false;
+                        return Err(e);
+                    }
                 }
                 Ok(TypedReply::new(Empty {}))
             }

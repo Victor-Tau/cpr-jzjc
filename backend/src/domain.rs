@@ -3,6 +3,9 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// 检测历史只保留最近三天，数量不设固定上限。
+pub const HISTORY_RETENTION_DAYS: u32 = 3;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Filter {
@@ -88,7 +91,7 @@ impl Default for Config {
             auto_disable: false,
             auto_move_group: false,
             target_group_id: String::new(),
-            retention_days: 30,
+            retention_days: HISTORY_RETENTION_DAYS,
             schedule: Schedule::default(),
             auto_check_updates: false,
             update_interval_hours: 24,
@@ -157,10 +160,8 @@ impl Config {
         if self.aliases.keys().any(|k| k.is_empty() || k.len() > 128) {
             return Err("别名名称无效".into());
         }
-        if !(1..=365).contains(&self.retention_days)
-            || !(1..=720).contains(&self.update_interval_hours)
-        {
-            return Err("历史保留须为1至365天，更新检查间隔为1至720小时".into());
+        if !(1..=720).contains(&self.update_interval_hours) {
+            return Err("更新检查间隔须为1至720小时".into());
         }
         if !self.mirror_prefix.is_empty() {
             let u = url::Url::parse(&self.mirror_prefix).map_err(|_| "镜像前缀须为HTTPS地址")?;
@@ -506,7 +507,7 @@ mod tests {
         assert!(!j.actions_pending());
         assert_eq!(j.config.low_confidence_retries, 1);
         assert_eq!(j.config.retry_delay_seconds, 10);
-        assert_eq!(j.config.retention_days, 30);
+        assert_eq!(j.config.retention_days, HISTORY_RETENTION_DAYS);
         assert!(!j.config.auto_move_group);
         assert_eq!(j.classify(&score("gpt-5.6-luna", 0.199)), "low_confidence");
         assert_eq!(j.classify(&score("gpt-5.6-luna", 0.20)), "inconclusive");

@@ -4,7 +4,7 @@
 
 - ModelTrace： https://github.com/xqy2006/ModelTrace ，MIT。固定提交和数据来源见评分运行时内 `vendor/modeltrace/SOURCE.json`，原许可证见同目录 `LICENSE`。
 - Codex Proxy RS SDK： https://github.com/zyycn/codex-proxy-rs ，Apache-2.0。固定提交见 `backend/Cargo.toml`。
-- @codex-proxy/ui： https://github.com/zyycn/codex-proxy-ui ，使用 0.4.1 发布包。
+- @codex-proxy/ui： https://github.com/zyycn/codex-proxy-ui ，使用 0.6.0 发布包。
 - Vue： https://github.com/vuejs/core ，MIT。
 - Lucide： https://github.com/lucide-icons/lucide ，ISC。
 - CPython、NumPy 及运行时原生库：原始许可证与声明汇总在 `THIRD_PARTY.txt`；运行时同时保留 Python 与 NumPy 原许可证文件。

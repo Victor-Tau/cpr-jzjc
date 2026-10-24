@@ -38,7 +38,7 @@ class Host:
         self.enabled=True;self.streams={};self.executions=[];self.closes=0;self.fail_model=False;self.fail_download=False
         self.identity="original";self.bank=(ROOT/"vendor/modeltrace/data/unified_bank.json").read_bytes();self.sha="b"*40
         self.disable_calls=0;self.fail_disable=False;self.sequence=1
-        self.fail_put=None;self.model_read_delay=0;self.callback_response_delay=0
+        self.fail_put=None;self.model_read_delay=0;self.model_response_delay=0;self.callback_response_delay=0
         self.additional_accounts=[]
         self.groups=[{'id':'group-test','name':'测试组'},{'id':'group-degraded','name':'降智隔离组'}]
         self.memberships=['group-test'];self.move_calls=0;self.fail_move=False;self.ignore_move=False;self.updates=[]
@@ -78,8 +78,10 @@ class Host:
         while True:
             meta,data,body=self.receive()
             if meta['type']=='callback':
-                delay=self.model_read_delay if meta['method']=='host.model.stream_read' else 0
-                self.model_read_delay=0 if delay else self.model_read_delay
+                is_stream=meta['method']=='host.model.stream_read'
+                persistent_delay=self.model_response_delay if is_stream else 0
+                delay=persistent_delay or (self.model_read_delay if is_stream else 0)
+                if is_stream and not persistent_delay:self.model_read_delay=0 if delay else self.model_read_delay
                 try:result,out=self.callback(meta['method'],data,body)
                 except SimulatedFault as e:self.send({'type':'error','id':meta['id'],'error':{'code':'rejected','message':str(e),'send_state':'not_sent'}})
                 else:
@@ -88,7 +90,7 @@ class Host:
                         timer=threading.Timer(delay,self.send,args=({'type':'result','id':meta['id']},result,out));timer.daemon=True;self.timers.append(timer);timer.start()
                     else:self.send({'type':'result','id':meta['id']},result,out)
                 finally:
-                    if delay and meta['method']=='host.model.stream_read':self.model_read_delay=delay
+                    if delay and is_stream and not persistent_delay:self.model_read_delay=delay
             elif meta.get('id')==i:
                 if meta['type']=='error':raise AssertionError(meta['error'])
                 return data,body
@@ -223,7 +225,7 @@ class Integration(unittest.TestCase):
 
     def test_defaults_and_saved_v13_config_survive_upgrade(self):
         fresh=self.host.request('api/bootstrap')['config']
-        self.assertEqual([fresh[k] for k in ['lowConfidencePercent','degradedPercent','confirmationRounds','lowConfidenceRetries','retryDelaySeconds','retentionDays']],[20,90,1,1,10,30])
+        self.assertEqual([fresh[k] for k in ['lowConfidencePercent','degradedPercent','confirmationRounds','lowConfidenceRetries','retryDelaySeconds','retentionDays']],[20,90,1,1,10,3])
         saved=self.config(lowConfidencePercent=60,degradedPercent=80,confirmationRounds=3,lowConfidenceRetries=2,retryDelaySeconds=30,timeoutSeconds=999)
         self.host.close();state=copy.deepcopy(self.host.state)
         for key in ['autoMoveGroup','targetGroupId']:state[('control','main')]['value']['config'].pop(key)
@@ -265,6 +267,17 @@ class Integration(unittest.TestCase):
                 self.assertEqual(report['groupState'],'moved' if move else 'none')
                 self.assertEqual(self.host.enabled,not disable);self.assertEqual(self.host.move_calls,int(move));self.assertEqual(len(self.host.executions),1)
                 if move:self.assertEqual(self.host.memberships,['group-degraded'])
+
+    def test_already_in_target_group_skips_redundant_move(self):
+        self.host.memberships=['group-degraded']
+        self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded')
+        identity=self.submit();self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['verdict'],'degraded')
+        self.assertEqual(report['groupState'],'moved')
+        self.assertNotIn('移组失败',report['message'])
+        self.assertEqual(self.host.move_calls,0)
+        self.assertEqual(self.host.memberships,['group-degraded'])
 
     def test_action_failure_does_not_block_other_action_or_reprobe(self):
         for failure in ['disable','move']:
@@ -352,7 +365,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),2);self.assertIn('连续两次',report['message'])
         for attempt in report['attempts']:
             self.assertEqual(attempt['diagnostics']['kind'],'host_budget_timeout');self.assertGreater(attempt['diagnostics']['receivedBytes'],0)
-            self.assertGreater(attempt['diagnostics']['budgetMs'],8400);self.assertLessEqual(attempt['diagnostics']['budgetMs'],9000)
+            self.assertGreater(attempt['diagnostics']['budgetMs'],8800);self.assertLessEqual(attempt['diagnostics']['budgetMs'],9400)
         self.host.tick();self.assertEqual(len(self.host.executions),2)
 
     def test_configured_timeout_keeps_five_attempt_limit(self):
@@ -391,9 +404,14 @@ class Integration(unittest.TestCase):
             return original(method,p,body)
         self.host.callback=callback;self.host.tick(budget_ms=10000)
         report=self.host.request('api/report?id='+identity)
+        self.assertTrue(report['attempts'][0]['diagnostics']['partial']);self.assertIsNone(report['attempts'][0]['error'])
+        if report['status']=='running':
+            # The validated sample is persisted before the deadline; grading
+            # may wait for the next maintenance callback.
+            self.assertFalse(report['pendingProbe']);self.assertEqual(report['progress']['stage'],'waiting_score')
+            self.host.tick();report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['status'],'completed')
         self.assertEqual(len(report['rounds']),1)
-        self.assertTrue(report['attempts'][0]['diagnostics']['partial']);self.assertIsNone(report['attempts'][0]['error'])
         self.host.model_read_delay=0;self.host.tick()
         self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed')
         self.assertEqual(len(self.host.executions),1)
@@ -528,7 +546,33 @@ class Integration(unittest.TestCase):
         self.assertEqual(sorted(order),['acct-test','acct-two'])
         self.assertEqual(self.host.move_calls,1) # Mock memberships are shared, so the second move is already satisfied.
 
-    def test_slow_move_saves_failure_before_budget_and_retry_verifies_without_duplicate(self):
+    def test_cancelled_maintenance_recovers_pending_probes(self):
+        self.host.additional_accounts=[{'id':'acct-two','name':'second','provider':'openai','enabled':True,'status':'normal','groups':[]}]
+        self.config(lowConfidencePercent=0,degradedPercent=100,maxConcurrency=2)
+        ids=self.host.request('api/submit',{'accountIds':['acct-test','acct-two'],'requestId':'cancel-recovery'})['submitted']
+        original=self.host.callback;delayed=False
+        def callback(method,p,body):
+            nonlocal delayed
+            result=original(method,p,body)
+            if (not delayed and method=='host.state.put' and p['namespace']=='jobs'
+                    and p['value'].get('pendingProbe') and p['value'].get('accountId')=='acct-two'):
+                delayed=True;self.host.callback_response_delay=8.5
+            return result
+        self.host.callback=callback
+        with self.assertRaises(AssertionError) as cancelled:
+            self.host.tick(budget_ms=8000)
+        self.assertIn('timed out',str(cancelled.exception))
+        before=len(self.host.executions)
+        self.host.tick()
+        for identity in ids:
+            report=self.host.request('api/report?id='+identity)
+            self.assertEqual(report['status'],'interrupted')
+            self.assertFalse(report['pendingProbe'])
+            self.assertIn('中断',report['message'])
+        # An uncertain in-flight probe must not be silently resent.
+        self.assertEqual(len(self.host.executions),before)
+
+    def test_slow_move_defers_to_next_callback_without_duplicate_update(self):
         self.confirmed_config(autoMoveGroup=True,targetGroupId='group-degraded')
         identity=self.submit();original=self.host.callback
         def callback(method,p,body):
@@ -539,9 +583,11 @@ class Integration(unittest.TestCase):
         self.host.callback=callback;started=time.monotonic();self.host.tick(budget_ms=10000)
         report=self.host.request('api/report?id='+identity)
         self.assertLess(time.monotonic()-started,10)
-        self.assertEqual(report['groupState'],'failed');self.assertIn('超时',report['groupError'])
+        # The idempotent update completed host-side, but its response missed
+        # this callback. Keep the action pending instead of reporting failure.
+        self.assertEqual(report['groupState'],'pending');self.assertIsNone(report['groupError'])
         self.assertEqual(self.host.move_calls,1)
-        self.host.request('api/retry-group',{'id':identity})
+        self.host.tick()
         self.assertEqual(self.host.request('api/report?id='+identity)['groupState'],'moved')
         self.assertEqual(self.host.move_calls,1);self.assertEqual(len(self.host.executions),1)
 
@@ -568,6 +614,27 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.host.request('api/delete',{'id':active}),{'ok':True,'deleted':1,'skipped':0})
         self.assertNotIn(('jobs',active),self.host.state)
         self.assertNotIn(active,self.host.request('api/bootstrap')['jobs'])
+    def test_history_keeps_three_days_without_count_limit(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();self.host.tick()
+        self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed')
+        self.host.close();state=copy.deepcopy(self.host.state)
+        template=copy.deepcopy(state[('jobs',identity)]['value'])
+        for key in ['samples','challenges','attempts','rounds']:template[key]=[]
+        now_ms=int(time.time()*1000);ids=[]
+        for i in range(500):
+            job_id=f'j-history-{i:04d}';job=copy.deepcopy(template)
+            job.update(id=job_id,status='completed',verdict='no_match',message='历史记录',createdAt=now_ms-1000,finishedAt=now_ms-500)
+            state[('jobs',job_id)]={'value':job,'version':1,'schema_version':1};ids.append(job_id)
+        state[('control','main')]['value']['jobIds'].extend(ids)
+        old=ids[0];state[('jobs',old)]['value']['finishedAt']=now_ms-4*86400000
+        self.host=Host(state=state);self.addCleanup(self.host.close)
+        self.assertEqual(len(self.host.request('api/bootstrap')['jobs']),501)
+        submitted=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'after-500-history'})['submitted'][0]
+        self.assertNotIn(('jobs',old),self.host.state)
+        self.host.request('api/report?id='+old,ok=False)
+        jobs=self.host.request('api/jobs')['jobs'];self.assertIn(submitted,[j['id'] for j in jobs]);self.assertEqual(len(jobs),501)
+
     def test_binding_idempotency_and_completed_scoring(self):
         self.config(degradedModels=['gpt-5.6-luna'],lowConfidencePercent=0,degradedPercent=100)
         identity=self.submit();self.assertEqual(identity,self.submit());self.host.tick()
@@ -614,7 +681,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(report['status'],'completed')
         self.assertEqual(len(report['attempts']),1);self.assertIsNone(report['attempts'][0]['error']);self.assertEqual(len(report['rounds']),1)
         self.assertGreater(report['attempts'][0]['diagnostics']['budgetMs'],28500)
-        self.assertLessEqual(report['attempts'][0]['diagnostics']['budgetMs'],29000)
+        self.assertLessEqual(report['attempts'][0]['diagnostics']['budgetMs'],29400)
         self.host.model_read_delay=0;self.host.tick()
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1)
@@ -906,6 +973,26 @@ class Integration(unittest.TestCase):
         self.assertEqual(right['status'],'cancelled')
         self.assertEqual(right['attempts'][0]['error'],'管理员取消检测')
         self.assertFalse(right['pendingProbe'])
+
+    def test_sixteen_way_wave_finishes_near_deadline_with_slow_storage(self):
+        ids=['acct-test']+[f'acct-{i}' for i in range(1,16)]
+        self.host.additional_accounts=[{'id':i,'name':i,'provider':'openai','enabled':True,'status':'normal','groups':[]} for i in ids[1:]]
+        self.config(lowConfidencePercent=0,degradedPercent=100,maxConcurrency=16)
+        submitted=self.host.request('api/submit',{'accountIds':ids,'requestId':'sixteen-near-deadline'})['submitted']
+        self.assertEqual(len(submitted),16)
+        original=self.host.callback
+        def callback(method,p,body):
+            if method=='host.state.put' and p['namespace']=='jobs' and p['value'].get('samples'):
+                time.sleep(0.08)
+            return original(method,p,body)
+        self.host.callback=callback;self.host.model_response_delay=25
+        started=time.monotonic();self.host.tick();self.assertLess(time.monotonic()-started,30)
+        reports=[self.host.request('api/report?id='+identity) for identity in submitted]
+        self.assertTrue(all(not r['pendingProbe'] and len(r['attempts'])==1 for r in reports))
+        if any(r['status']=='running' for r in reports):
+            self.host.tick();reports=[self.host.request('api/report?id='+identity) for identity in submitted]
+        self.assertTrue(all(r['status']=='completed' and len(r['rounds'])==1 for r in reports))
+        self.assertEqual(len(self.host.executions),16)
 
     def test_parent_budget_times_out_cleanly_without_interrupting_job(self):
         self.config();identity=self.submit();self.host.model_read_delay=31

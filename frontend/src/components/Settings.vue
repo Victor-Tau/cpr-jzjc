@@ -28,7 +28,7 @@ const exportedJson = ref('')
 const exportedField = ref<HTMLTextAreaElement>()
 const targetOptions = computed(() => props.groups.map(g => ({ value:g.id, label:g.name })))
 function useDefaults() {
-  Object.assign(cfg.value, {lowConfidencePercent:20, degradedPercent:90, confirmationRounds:1, lowConfidenceRetries:1, retryDelaySeconds:10, retentionDays:30})
+  Object.assign(cfg.value, {lowConfidencePercent:20, degradedPercent:90, confirmationRounds:1, lowConfidenceRetries:1, retryDelaySeconds:10, retentionDays:3})
   fileNotice.value='已填入 1.4 默认规则，保存后生效。'
 }
 function exportConfig() {
@@ -102,7 +102,7 @@ function save() {
       <label>temperature（留空使用默认）<input :value="cfg.temperature ?? ''" type="number" min="0" max="2" step="0.1" @input="cfg.temperature = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"></label>
       <label>推理强度<ZSelect v-model="cfg.reasoningEffort" :options="['','none','minimal','low','medium','high','xhigh'].map(s => ({ value:s,label:s || '不传递' }))" aria-label="推理强度" /></label>
       <label>输出 token 上限<input type="number" min="512" max="16384" :value="cfg.maxOutputTokens" @input="number($event,'maxOutputTokens')"></label>
-      <label>单次请求超时（秒）<input type="number" min="0" step="1" :value="cfg.timeoutSeconds" @input="number($event,'timeoutSeconds')"><small>默认120秒，0表示不设请求超时。执行时会提前预留校验和保存时间；RS 3.29.7 的后台总预算为30秒，请求最长约29秒；预算内收到的部分正文通过样本校验后可接纳；仅推理内容不能作为样本。</small></label>
+      <label>单次请求超时（秒）<input type="number" min="0" step="1" :value="cfg.timeoutSeconds" @input="number($event,'timeoutSeconds')"><small>默认120秒，0表示不设请求超时。执行时会提前预留校验和保存时间；RS 3.30.2 的后台总预算为30秒，单任务请求最长约29秒，16路并行约26.5秒；预算内收到的部分正文通过样本校验后可接纳；仅推理内容不能作为样本。</small></label>
       <label>并行检测数（批内同时探测账户数）<input type="number" min="1" max="16" step="1" :value="cfg.maxConcurrency" @input="number($event,'maxConcurrency')"><small>默认4。同一后台回调内最多并行检测的账户数，提升批量检测整体速度；宿主限制单次回调最多16路并发流，过大也可能触发计量Key限流而浪费重试。</small></label>
     </section>
 
@@ -114,7 +114,7 @@ function save() {
         <label>连续确认轮数<input type="number" min="1" max="5" :value="cfg.confirmationRounds" @input="number($event,'confirmationRounds')"></label>
         <label>低置信度额外复测次数<input type="number" min="0" max="5" :value="cfg.lowConfidenceRetries" @input="number($event,'lowConfidenceRetries')"></label>
         <label>复测与失败重试间隔（秒）<input type="number" min="0" max="3600" :value="cfg.retryDelaySeconds" @input="number($event,'retryDelaySeconds')"></label>
-        <label>历史保留（天）<input type="number" min="1" max="365" :value="cfg.retentionDays" @input="number($event,'retentionDays')"></label>
+        <div class="field"><span>历史保留</span><small>自动保存最近3天，过期记录在提交检测和后台维护时清理；不限制记录条数，仅受宿主存储预算约束。</small></div>
         <label class="wide">模型别名（每行：请求名称=指纹库模型ID）<textarea v-model="aliases" rows="3" placeholder="my-luna=gpt-5.6-luna" /></label>
       </div>
       <div class="callout"><div class="checks"><ZCheckbox v-model="cfg.autoDisable" label="确认降智后自动关闭该账户调度" /><ZCheckbox v-model="cfg.autoMoveGroup" label="确认降智后移入指定分组" /></div><label v-if="cfg.autoMoveGroup" class="action-target">目标分组<ZSelect v-model="cfg.targetGroupId" :options="targetOptions" placeholder="选择已有分组" aria-label="降智目标分组" /></label><p>两项可同时开启，达到确认轮数后分别执行。移组会将原有分组替换为目标分组；停用后由管理员在宿主中恢复。</p></div>
