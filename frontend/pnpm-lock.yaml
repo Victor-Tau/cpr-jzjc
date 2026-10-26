@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@codex-proxy/ui':
-        specifier: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.6.0/codex-proxy-ui-0.6.0.tgz
-        version: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.6.0/codex-proxy-ui-0.6.0.tgz(vite@8.3.0(@types/node@26.5.1)(jiti@2.7.0))(vue@3.5.42(typescript@6.0.3))
+        specifier: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz
+        version: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz(vite@8.3.0(@types/node@26.5.1)(jiti@2.7.0))(vue@3.5.42(typescript@6.0.3))
       '@lucide/vue':
         specifier: 1.47.0
         version: 1.47.0(vue@3.5.42(typescript@6.0.3))
@@ -62,13 +62,17 @@ packages:
     engines: {node: '>=6.0.0'}
     hasBin: true
 
+  '@babel/runtime@7.29.10':
+    resolution: {integrity: sha512-NpugTzbKgGrNe45Ui32cN8vCFFMxVtP/9rtfwv0nP5FRDAjvYBxJcLVpYA9mr1jxP6cnIT7x9LUzuDTbWYYNRA==}
+    engines: {node: '>=6.9.0'}
+
   '@babel/types@7.29.8':
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
 
-  '@codex-proxy/ui@https://github.com/zyycn/codex-proxy-ui/releases/download/v0.6.0/codex-proxy-ui-0.6.0.tgz':
-    resolution: {integrity: sha512-dGZDnpLAh2RtAD9lEEv1gCQiBXgiNuR8qdmGXmfi/PNFTAER6dw/XfQnV5DC0MPrZs3PiULvtMoUS+S5v0nHDg==, tarball: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.6.0/codex-proxy-ui-0.6.0.tgz}
-    version: 0.6.0
+  '@codex-proxy/ui@https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz':
+    resolution: {integrity: sha512-eYc0/C0ILOvxAFzNYpB6TfJGkgRnPr3v2qpm7GDEQo9mfLeH8CNlIOYw9/VQf/OeRF/xzQVZOt1BYtp2yA4SKQ==, tarball: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz}
+    version: 0.7.0
     engines: {node: '>=24'}
     peerDependencies:
       vite: ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0
@@ -105,6 +109,10 @@ packages:
 
   '@oxc-project/types@0.154.0':
     resolution: {integrity: sha512-KYOUGQFlLWR+s4QMV2Q9ko38TZm7EdO87Qm7rvZLqk/webse/cDjtyxKhg/47l0byCbs/k46LT8qc4PKjAikzA==}
+
+  '@rc-component/async-validator@6.0.0':
+    resolution: {integrity: sha512-D3AGQwdyE58gmvx6waVSXJ80JGO+IY5L2O8HDnSOex7JNlzB3GuN/4hyHNTdhy2qtOhkpbIjmeAN3tL993wKbA==}
+    engines: {node: '>=14.x'}
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     resolution: {integrity: sha512-aWR+XKH9+rW7m5fWq/5360J3mHycrx/o6xZM2DQFdJnTMdyP7/WzxPjhtLbVWdKo2y612/4U1bWqb3HQhiF7vg==}
@@ -761,16 +769,19 @@ snapshots:
     dependencies:
       '@babel/types': 7.29.8
 
+  '@babel/runtime@7.29.10': {}
+
   '@babel/types@7.29.8':
     dependencies:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@codex-proxy/ui@https://github.com/zyycn/codex-proxy-ui/releases/download/v0.6.0/codex-proxy-ui-0.6.0.tgz(vite@8.3.0(@types/node@26.5.1)(jiti@2.7.0))(vue@3.5.42(typescript@6.0.3))':
+  '@codex-proxy/ui@https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz(vite@8.3.0(@types/node@26.5.1)(jiti@2.7.0))(vue@3.5.42(typescript@6.0.3))':
     dependencies:
       '@ant-design/colors': 8.0.1
       '@ant-design/fast-color': 3.0.1
       '@lucide/vue': 1.59.0(vue@3.5.42(typescript@6.0.3))
+      '@rc-component/async-validator': 6.0.0
       '@vueuse/core': 15.0.0(vue@3.5.42(typescript@6.0.3))
       '@vueuse/integrations': 15.0.0(sortablejs@1.15.7)(vue@3.5.42(typescript@6.0.3))
       dayjs: 1.11.23
@@ -823,6 +834,10 @@ snapshots:
       vue: 3.5.42(typescript@6.0.3)
 
   '@oxc-project/types@0.154.0': {}
+
+  '@rc-component/async-validator@6.0.0':
+    dependencies:
+      '@babel/runtime': 7.29.10
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     optional: true

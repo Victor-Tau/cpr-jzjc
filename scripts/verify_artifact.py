@@ -22,8 +22,8 @@ with tempfile.TemporaryDirectory(prefix='modeltrace-package-check-') as director
         archive.extractall(root,filter='data')
     manifest=json.loads((root/'plugin.json').read_text())
     assert manifest['publisher']== 'personal' and manifest['name']== 'modeltrace-health'
-    assert manifest['package']['protocolVersion'] == 6
-    assert manifest['engines']['codex-proxy-rs'] == '>=3.32.0, <3.33.0'
+    assert manifest['package']['protocolVersion'] == 7
+    assert manifest['engines']['codex-proxy-rs'] == '>=3.33.0, <3.34.0'
     assert set(manifest['package']['files']) == {manifest['main'], *manifest['resources']}
     for path, expected in manifest['package']['files'].items():
         assert hashlib.sha256((root/path).read_bytes()).hexdigest() == expected, path

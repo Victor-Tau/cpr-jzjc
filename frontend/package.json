@@ -1,6 +1,6 @@
 {
   "name": "modeltrace-health-frontend",
-  "version": "1.8.2",
+  "version": "1.9.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -14,7 +14,7 @@
   "dependencies": {
     "vue": "3.5.42",
     "@lucide/vue": "1.47.0",
-    "@codex-proxy/ui": "https://github.com/zyycn/codex-proxy-ui/releases/download/v0.6.0/codex-proxy-ui-0.6.0.tgz"
+    "@codex-proxy/ui": "https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz"
   },
   "devDependencies": {
     "vite": "8.3.0",

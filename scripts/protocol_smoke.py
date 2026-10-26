@@ -31,9 +31,10 @@ def model_events(*values, end=False, wire_kind='json', parsed=True):
     return {'events':len(events),'end':end},b'HME1'+struct.pack('>I',len(events))+b''.join(struct.pack('>I',len(e)) for e in events)+b''.join(events)
 
 class Host:
-    def __init__(self, binary=BINARY, state=None, protocol_version=6):
+    def __init__(self, binary=BINARY, state=None, protocol_version=7):
         self.protocol_version=protocol_version
         self.send_lock=threading.Lock();self.timers=[]
+        self.scheduling=[];self.pending_callbacks={};self.schedule_epochs={};self.suspended=set()
         self.state={} if state is None else state
         self.enabled=True;self.streams={};self.executions=[];self.closes=0;self.fail_model=False;self.fail_download=False
         self.identity="original";self.bank=(ROOT/"vendor/modeltrace/data/unified_bank.json").read_bytes();self.sha="b"*40
@@ -69,8 +70,29 @@ class Host:
                 if not chunk:raise AssertionError('Plugin stopped: '+self.process.stderr.read().decode()[:1000])
                 out+=chunk
             return out
-        a,b=struct.unpack('>IQ',read(12));meta=json.loads(read(a));body=read(b);d=meta.get('data_bytes',0);r=meta.get('request_context_bytes',0)
-        return meta,json.loads(body[r:r+d]) if d else None,body[r+d:]
+        while True:
+            a,b=struct.unpack('>IQ',read(12));meta=json.loads(read(a));body=read(b);d=meta.get('data_bytes',0);r=meta.get('request_context_bytes',0)
+            kind=meta['type']
+            if kind in ('suspend','resume','callback_consumed'):
+                assert self.protocol_version >= 7, meta
+                self.scheduling.append(meta)
+                if kind=='suspend':
+                    identity=meta['id'];epoch=meta['epoch']
+                    assert identity not in self.suspended, meta
+                    assert epoch==self.schedule_epochs.get(identity,0)+1, meta
+                    self.schedule_epochs[identity]=epoch;self.suspended.add(identity)
+                elif kind=='resume':
+                    identity=meta['id']
+                    assert identity in self.suspended and meta['epoch']==self.schedule_epochs[identity], meta
+                    self.suspended.remove(identity)
+                    self.send({'type':'resumed','id':identity,'epoch':meta['epoch']})
+                else:
+                    assert self.pending_callbacks.pop(meta['id'])==meta['parent_id'], meta
+                continue
+            if kind=='callback' and self.protocol_version >= 7:
+                assert meta['id'] not in self.pending_callbacks, meta
+                self.pending_callbacks[meta['id']]=meta['parent_id']
+            return meta,json.loads(body[r:r+d]) if d else None,body[r+d:]
 
     def call(self,method,params=None,payload=b'',stage='management',timeout_ms=30000):
         i=self.sequence;self.sequence+=2
@@ -678,8 +700,20 @@ class Integration(unittest.TestCase):
             self.host.tick();report=self.host.request('api/report?id='+identity)
         self.assertEqual(len(self.host.executions),2) # Warmup + one slow probe; scoring never replays it.
         self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1);self.assertEqual(self.host.closes,0)
+    def test_rpc_v7_cooperative_scheduling_and_callback_consumption(self):
+        self.assertEqual(self.host.protocol_version,7)
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();self.host.callback_response_delay=0.05
+        self.host.tick(2)
+        self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed')
+        kinds={message['type'] for message in self.host.scheduling}
+        self.assertEqual(kinds,{'suspend','resume','callback_consumed'})
+        self.assertFalse(self.host.pending_callbacks)
+        self.assertFalse(self.host.suspended)
+        self.assertEqual(len(self.host.executions),1)
+
     def test_declared_budget_allows_parallel_responses_after_thirty_seconds(self):
-        self.assertEqual(self.host.protocol_version,6)
+        self.assertEqual(self.host.protocol_version,7)
         self.assertEqual(self.host.call_budgets,{'maintenance':180000})
         self.config(lowConfidencePercent=0,degradedPercent=100,maxConcurrency=4)
         ids=['acct-test',*[f'acct-long-{i}' for i in range(3)]]
@@ -1211,5 +1245,5 @@ class Integration(unittest.TestCase):
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,default=BINARY);parser.add_argument('--deny-timestamps',action='store_true',help='Use strace to deny utimensat and exercise restricted runtime extraction');parser.add_argument('--runtime-tmpdir',type=Path,help='Set TMPDIR for the plugin process to exercise runtime directory fallback');args,remaining=parser.parse_known_args();BINARY=args.binary;DENY_TIMESTAMPS=args.deny_timestamps;RUNTIME_TMPDIR=args.runtime_tmpdir
     # Host defaults are evaluated at definition time.
-    Host.__init__.__defaults__=(BINARY,None,6)
+    Host.__init__.__defaults__=(BINARY,None,7)
     unittest.main(argv=[sys.argv[0],*remaining])
