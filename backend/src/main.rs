@@ -5,7 +5,7 @@ mod host;
 mod manager;
 mod progress;
 use gateway_plugin_sdk::{
-    Manifest, PluginFault,
+    CallBudgets, Manifest, PluginFault, Stage,
     call::management::*,
     client::{Empty, PluginBuilder, PluginSession, SessionConfig, TypedCall, TypedReply, methods},
 };
@@ -244,7 +244,7 @@ async fn handle(
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let session = PluginSession::accept(
+    let mut session = PluginSession::accept(
         tokio::io::stdin(),
         tokio::io::stdout(),
         SessionConfig::default(),
@@ -256,6 +256,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("插件握手身份不匹配".into());
     }
+    // 默认模型请求需要完整的 120 秒，另留准备、并行结果保存和评分时间。
+    session.set_call_budgets(CallBudgets::from([(Stage::Maintenance, 180_000)]))?;
     let progress = Arc::new(progress::Progress::new());
     let manager = manager::Manager::new(progress.clone());
     let reload_signal = manager.reload_flag();
@@ -350,12 +352,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         flag: reload_signal,
                         armed: true,
                     };
-                    let result = m
-                        .tick(
-                            &call.host,
-                            std::time::Duration::from_millis(call.context.timeout_ms),
-                        )
-                        .await;
+                    let budget = call
+                        .host
+                        .remaining_budget()
+                        .ok_or_else(|| host::fault("维护预算不可用"))?;
+                    let result = m.tick(&call.host, budget).await;
                     guard.armed = false;
                     if let Err(e) = result {
                         m.loaded = false;

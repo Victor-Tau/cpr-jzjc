@@ -31,7 +31,7 @@ def model_events(*values, end=False, wire_kind='json', parsed=True):
     return {'events':len(events),'end':end},b'HME1'+struct.pack('>I',len(events))+b''.join(struct.pack('>I',len(e)) for e in events)+b''.join(events)
 
 class Host:
-    def __init__(self, binary=BINARY, state=None, protocol_version=5):
+    def __init__(self, binary=BINARY, state=None, protocol_version=6):
         self.protocol_version=protocol_version
         self.send_lock=threading.Lock();self.timers=[]
         self.state={} if state is None else state
@@ -51,6 +51,7 @@ class Host:
         contributes={name:{'id':'personal.modeltrace-health.'+name,'version':version,'stages':[name]} for name,version in [('management',2),('maintenance',1)]}
         self.send({'type':'hello','handshake':{'protocol_version':protocol_version,'artifact_sha256':'a'*64,'plugin_id':'personal.modeltrace-health','instance_id':'test','generation':1,'incarnation':'test-run','contributes':contributes}}, {})
         ready,_,_=self.receive();assert ready['type']=='ready',ready
+        self.call_budgets=ready.get('call_budgets',{})
 
     def send(self,meta,data=None,payload=b''):
         meta=copy.deepcopy(meta);encoded=b'' if data is None else raw(data)
@@ -63,7 +64,7 @@ class Host:
         def read(n):
             out=b''
             while len(out)<n:
-                if not select.select([self.process.stdout],[],[],35)[0]:raise AssertionError('Plugin RPC timed out')
+                if not select.select([self.process.stdout],[],[],max(35,getattr(self,'receive_timeout',35)))[0]:raise AssertionError('Plugin RPC timed out')
                 chunk=os.read(self.process.stdout.fileno(),n-len(out))
                 if not chunk:raise AssertionError('Plugin stopped: '+self.process.stderr.read().decode()[:1000])
                 out+=chunk
@@ -73,6 +74,7 @@ class Host:
 
     def call(self,method,params=None,payload=b'',stage='management',timeout_ms=30000):
         i=self.sequence;self.sequence+=2
+        self.receive_timeout=timeout_ms/1000+5
         context={'call_id':i,'instance_id':'test','generation':1,'incarnation':'test-run','stage':stage,'timeout_ms':timeout_ms,'resource_stream':False,'resource_scope_id':f'scope-{i}','request_id':None,'attempt_id':None,'account_id':None,'credential_revision':None}
         self.send({'type':'call','id':i,'method':method,'context':context},params or {},payload)
         while True:
@@ -104,6 +106,7 @@ class Host:
         return result
 
     def tick(self,n=1,budget_ms=30000):
+        # 旧回归有意保留 30 秒短预算；新预算用例使用 ready 中协商的值。
         for _ in range(n):self.call('plugin.reconcile',stage='maintenance',timeout_ms=budget_ms)
 
     def stream(self,body):
@@ -600,7 +603,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.host.move_calls,1);self.assertEqual(len(self.host.executions),1)
 
     def test_registration_and_queries(self):
-        _,payload=self.host.call('management.register',stage='registration');registration=json.loads(payload);self.assertIn('api/report',[r['path'] for r in registration['routes']])
+        _,payload=self.host.call('management.register',stage='registration',timeout_ms=5000);registration=json.loads(payload);self.assertIn('api/report',[r['path'] for r in registration['routes']])
         self.assertEqual(self.host.request('api/accounts')['accounts'][0]['groups'][0]['id'],'group-test')
         self.assertIn('gpt-6.1-sol',self.host.request('api/models?keyId=key-test')['models'])
     def test_batch_delete_history_skips_active_and_keeps_legacy_id(self):
@@ -675,6 +678,40 @@ class Integration(unittest.TestCase):
             self.host.tick();report=self.host.request('api/report?id='+identity)
         self.assertEqual(len(self.host.executions),2) # Warmup + one slow probe; scoring never replays it.
         self.assertEqual(report['status'],'completed');self.assertEqual(len(report['rounds']),1);self.assertEqual(self.host.closes,0)
+    def test_declared_budget_allows_parallel_responses_after_thirty_seconds(self):
+        self.assertEqual(self.host.protocol_version,6)
+        self.assertEqual(self.host.call_budgets,{'maintenance':180000})
+        self.config(lowConfidencePercent=0,degradedPercent=100,maxConcurrency=4)
+        ids=['acct-test',*[f'acct-long-{i}' for i in range(3)]]
+        self.host.additional_accounts=[{'id':i,'name':i,'provider':'openai','enabled':True,'status':'normal','groups':[]} for i in ids[1:]]
+        submitted=self.host.request('api/submit',{'accountIds':ids,'requestId':'parallel-after-thirty'})['submitted']
+        self.host.model_response_delay=31
+        self.host.tick(budget_ms=self.host.call_budgets['maintenance'])
+        for identity in submitted:
+            report=self.host.request('api/report?id='+identity)
+            self.assertEqual(report['status'],'completed')
+            self.assertEqual(len(report['attempts']),1)
+            self.assertIsNone(report['attempts'][0]['error'])
+            diagnostics=report['attempts'][0]['diagnostics']
+            self.assertGreaterEqual(diagnostics['elapsedMs'],31000)
+            self.assertGreaterEqual(diagnostics['budgetMs'],119000)
+            self.assertLessEqual(diagnostics['budgetMs'],120000)
+        self.assertEqual(len(self.host.executions),4)
+        self.assertEqual(self.host.closes,0)
+
+    def test_declared_budget_allows_response_after_old_sdk_cap(self):
+        self.config(timeoutSeconds=150,lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();self.host.model_response_delay=121
+        self.host.tick(budget_ms=self.host.call_budgets['maintenance'])
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'completed')
+        self.assertEqual(len(report['attempts']),1)
+        self.assertIsNone(report['attempts'][0]['error'])
+        self.assertGreaterEqual(report['attempts'][0]['diagnostics']['elapsedMs'],121000)
+        self.assertGreaterEqual(report['attempts'][0]['diagnostics']['budgetMs'],149000)
+        self.assertEqual(len(self.host.executions),1)
+        self.assertEqual(self.host.closes,0)
+
     def test_late_response_scores_in_same_callback(self):
         # A response at 28.7s must use the extended request window and score
         # immediately, without waiting for another maintenance callback.
@@ -1174,5 +1211,5 @@ class Integration(unittest.TestCase):
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,default=BINARY);parser.add_argument('--deny-timestamps',action='store_true',help='Use strace to deny utimensat and exercise restricted runtime extraction');parser.add_argument('--runtime-tmpdir',type=Path,help='Set TMPDIR for the plugin process to exercise runtime directory fallback');args,remaining=parser.parse_known_args();BINARY=args.binary;DENY_TIMESTAMPS=args.deny_timestamps;RUNTIME_TMPDIR=args.runtime_tmpdir
     # Host defaults are evaluated at definition time.
-    Host.__init__.__defaults__=(BINARY,None,5)
+    Host.__init__.__defaults__=(BINARY,None,6)
     unittest.main(argv=[sys.argv[0],*remaining])

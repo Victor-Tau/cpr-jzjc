@@ -102,7 +102,7 @@ function save() {
       <label>temperature（留空使用默认）<input :value="cfg.temperature ?? ''" type="number" min="0" max="2" step="0.1" @input="cfg.temperature = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"></label>
       <label>推理强度<ZSelect v-model="cfg.reasoningEffort" :options="['','none','minimal','low','medium','high','xhigh'].map(s => ({ value:s,label:s || '不传递' }))" aria-label="推理强度" /></label>
       <label>输出 token 上限<input type="number" min="512" max="16384" :value="cfg.maxOutputTokens" @input="number($event,'maxOutputTokens')"></label>
-      <label>单次请求超时（秒）<input type="number" min="0" step="1" :value="cfg.timeoutSeconds" @input="number($event,'timeoutSeconds')"><small>默认120秒，0表示不设请求超时。执行时会提前预留校验和保存时间；RS 3.31.1 的后台总预算为30秒，单任务请求最长约29秒，16路并行约26.5秒；预算内收到的部分正文通过样本校验后可接纳；仅推理内容不能作为样本。</small></label>
+      <label>单次请求超时（秒）<input type="number" min="0" step="1" :value="cfg.timeoutSeconds" @input="number($event,'timeoutSeconds')"><small>默认120秒，0表示不设请求超时。执行时会提前预留校验和保存时间；插件后台总预算为180秒，默认120秒请求可完整等待；更长请求仍受本次剩余预算约束；预算内收到的部分正文通过样本校验后可接纳；仅推理内容不能作为样本。</small></label>
       <label>并行检测数（批内同时探测账户数）<input type="number" min="1" max="16" step="1" :value="cfg.maxConcurrency" @input="number($event,'maxConcurrency')"><small>默认4。同一后台回调内最多并行检测的账户数，提升批量检测整体速度；宿主限制单次回调最多16路并发流，过大也可能触发计量Key限流而浪费重试。</small></label>
     </section>
 

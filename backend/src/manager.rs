@@ -841,8 +841,7 @@ impl Manager {
         host: &HostClient,
         budget: std::time::Duration,
     ) -> Result<(), PluginFault> {
-        // Up to 29s for requests; the warm worker can validate and score within
-        // the final second. Keep a separate margin for state persistence.
+        // 请求窗口随宿主本次预算变化，预留收尾时间，不再假定维护只有 30 秒。
         self.request_window = budget.saturating_sub(std::time::Duration::from_secs(1));
         self.deadline = Some(
             tokio::time::Instant::now()
