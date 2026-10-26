@@ -18,7 +18,7 @@ const tab = ref('accounts'), loading = ref(true), busy = ref(false), error = ref
 const accounts = ref<Account[]>([]), jobs = ref<Job[]>([]), config = ref<Config>(), banks = ref<Banks>()
 const allGroups = ref<Group[]>([])
 const keys = ref<{ id:string; name:string }[]>([]), revision = ref(0), settingsKey = ref(0), nextDue = ref<number|null>(null), scheduleError = ref<string|null>(null)
-const search = ref(''), plan = ref(''), state = ref(''), group = ref(''), resultFilter = ref(''), page = ref(1), pageSize = ref(20), selected = ref<string[]>([])
+const search = ref(''), plan = ref(''), state = ref(''), group = ref(''), resultFilter = ref(''), page = ref(1), pageSize = ref(100), selected = ref<string[]>([])
 const queueOnly = ref(false)
 const resultOptions = [{value:'',label:'全部检测结果'},{value:'degraded',label:'降智'},{value:'no_match',label:'未降智'},{value:'other',label:'其他'}]
 const resultCategory = (job?: Job) => job?.status === 'completed' && ['degraded','no_match'].includes(job.verdict) ? job.verdict : 'other'

@@ -48,6 +48,11 @@ try {
   await page.getByRole('textbox',{name:'搜索账户',exact:true}).waitFor()
   await page.getByText('未降智',{exact:true}).first().waitFor()
   assert.equal(await page.getByText('未命中降智规则',{exact:true}).count(),0)
+  assert.match(await page.getByLabel('每页条数',{exact:true}).innerText(),/100 条\/页/)
+  assert.equal(await page.locator('tbody .identity b').count(),fixture.accounts.length)
+  await page.getByLabel('每页条数',{exact:true}).click()
+  await page.getByRole('option',{name:'20 条/页',exact:true}).click()
+  await page.getByRole('listbox').waitFor({state:'hidden'})
   // Exercise categories against the visible conclusion and latest record.
   await page.evaluate(()=>{
     const f=window.__fixture
