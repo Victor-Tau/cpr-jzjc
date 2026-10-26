@@ -19,6 +19,9 @@ const accounts = ref<Account[]>([]), jobs = ref<Job[]>([]), config = ref<Config>
 const allGroups = ref<Group[]>([])
 const keys = ref<{ id:string; name:string }[]>([]), revision = ref(0), settingsKey = ref(0), nextDue = ref<number|null>(null), scheduleError = ref<string|null>(null)
 const search = ref(''), plan = ref(''), state = ref(''), group = ref(''), resultFilter = ref(''), page = ref(1), pageSize = ref(20), selected = ref<string[]>([])
+const queueOnly = ref(false)
+const resultOptions = [{value:'',label:'全部检测结果'},{value:'degraded',label:'降智'},{value:'no_match',label:'未降智'},{value:'other',label:'其他'}]
+const resultCategory = (job?: Job) => job?.status === 'completed' && ['degraded','no_match'].includes(job.verdict) ? job.verdict : 'other'
 const historySearch = ref(''), historyVerdict = ref(''), historyPage = ref(1), historySize = ref(20), historySelected = ref<string[]>([])
 const report = ref<Report>(), reportOpen = ref(false), roundIndex = ref(0)
 const confirmIds = ref<string[]>([]), confirmOpen = ref(false)
@@ -40,7 +43,8 @@ const filtered = computed(() => accounts.value.filter(a => {
     && (!state.value || (state.value === 'disabled' ? !a.enabled : a.enabled && a.status === state.value))
     && (!group.value || (group.value === '__ungrouped__' ? !a.groups.length : a.groups.some(g => g.id === group.value)))
     && (!search.value.trim() || `${a.name} ${a.email || ''} ${a.id}`.toLowerCase().includes(search.value.trim().toLowerCase()))
-    && (!resultFilter.value || (resultFilter.value === 'active' ? jobs.value.some(j => j.accountId === a.id && active(j)) : j?.verdict === resultFilter.value))
+    && (!queueOnly.value || jobs.value.some(j => j.accountId === a.id && active(j)))
+    && (!resultFilter.value || (a.supported ? resultCategory(j) : 'other') === resultFilter.value)
 }))
 const visible = computed(() => filtered.value.slice((page.value-1)*pageSize.value,page.value*pageSize.value))
 const pageCandidates = computed(() => visible.value.filter(canDetect))
@@ -73,15 +77,15 @@ function shortWhen(value: number) {
 }
 const nextRun = computed(() => config.value?.schedule.enabled ? nextDue.value : null)
 const runWhen = computed(() => nextRun.value == null ? '—' : nextRun.value <= clock.value + 2000 ? '现在' : shortWhen(nextRun.value))
-const degradedCount = computed(() => Array.from(latest.value.values()).filter(j => j.verdict === 'degraded').length)
-const history = computed(() => jobs.value.filter(j => (!historySearch.value || `${j.accountName} ${j.accountId}`.toLowerCase().includes(historySearch.value.toLowerCase())) && (!historyVerdict.value || j.verdict === historyVerdict.value || j.status === historyVerdict.value)))
+const degradedCount = computed(() => accounts.value.filter(a => a.supported && resultCategory(jobOf(a)) === 'degraded').length)
+const history = computed(() => jobs.value.filter(j => (!historySearch.value || `${j.accountName} ${j.accountId}`.toLowerCase().includes(historySearch.value.toLowerCase())) && (!historyVerdict.value || resultCategory(j) === historyVerdict.value)))
 const historyDeletable = (j: Job) => !active(j) && !['pending','attempting'].includes(j.disableState) && !['pending','attempting'].includes(j.groupState)
 const historyCandidates = computed(() => history.value.filter(historyDeletable))
 const selectedHistory = computed(() => jobs.value.filter(j => historySelected.value.includes(j.id) && historyDeletable(j)))
 const allHistory = computed(() => historyCandidates.value.length > 0 && historyCandidates.value.every(j => historySelected.value.includes(j.id)))
 const visibleHistory = computed(() => history.value.slice((historyPage.value-1)*historySize.value,historyPage.value*historySize.value))
 const currentRound = computed(() => report.value?.rounds[roundIndex.value])
-watch([search,plan,state,group,resultFilter,pageSize], () => { page.value=1 })
+watch([search,plan,state,group,resultFilter,queueOnly,pageSize], () => { page.value=1 })
 watch([historySearch,historyVerdict,historySize], () => { historyPage.value=1 })
 watch(filtered, a => { page.value=Math.min(page.value,Math.max(1,Math.ceil(a.length/pageSize.value))) })
 watch(history, a => { historyPage.value=Math.min(historyPage.value,Math.max(1,Math.ceil(a.length/historySize.value))) })
@@ -169,9 +173,9 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
     <div v-if="notice" class="message success" role="status"><span>{{ notice }}</span><button aria-label="关闭提示" @click="notice=''">×</button></div>
     <p v-if="loading">正在读取账户与插件配置…</p>
     <template v-if="tab==='accounts'">
-      <div class="counters"><button @click="resultFilter=''">全部账户 <b>{{ accounts.length }}</b></button><button @click="resultFilter='active'">检测队列 <b>{{ activeJobs }}</b></button><button class="danger" @click="resultFilter='degraded'">确认降智 <b>{{ degradedCount }}</b></button><span class="auto-pill" :class="config?.schedule.enabled ? 'on' : 'off'" role="status" :title="autoTitle">{{ config?.schedule.enabled ? `自动检测 · ${autoPeriod}` : '自动检测 · 已关闭' }}</span><span class="next-run" :title="nextRun != null ? `下次自动检测：${date(nextRun)}` : '当前没有待执行的自动检测'">下次检测 <b class="small">{{ runWhen }}</b></span></div>
-      <div class="toolbar"><ZInput v-model="search" class="search" placeholder="搜索名称、邮箱或账户ID" clearable aria-label="搜索账户"><template #prefix><Search :size="16" /></template></ZInput><ZSelect v-model="plan" class="filter" :options="plans" aria-label="订阅类型筛选" /><ZSelect v-model="state" class="filter" :options="statuses" aria-label="账户状态筛选" /><ZSelect v-model="group" class="filter" :options="groups" aria-label="账户分组筛选" /><div class="commands"><ZButton :disabled="busy" @click="action(loadAccounts)"><template #icon><RefreshCw :size="15" /></template>刷新账户</ZButton><ZButton v-if="manualJobs" :disabled="busy" @click="cancel(undefined,'manual')"><template #icon><Square :size="14" /></template>停止手动队列</ZButton><ZButton v-if="scheduledJobs" :disabled="busy" @click="cancel(undefined,'schedule')"><template #icon><Square :size="14" /></template>停止自动队列</ZButton><ZButton type="primary" :disabled="busy || !chosen.length" @click="openSubmit(chosen.map(a=>a.id))"><template #icon><Play :size="15" /></template>检测所选（{{ chosen.length }}）</ZButton></div></div>
-      <div class="selection"><ZCheckbox :model-value="allPage" :disabled="!pageCandidates.length || busy" label="选择当前页" @change="selectPage" /><span>已选 {{ chosen.length }} 个 · 匹配 {{ filtered.length }} 个</span><ZButton v-if="selected.length" size="small" variant="text" @click="selected=[]">清空选择</ZButton><ZButton v-if="resultFilter" size="small" variant="text" @click="resultFilter=''">清除结果筛选</ZButton></div>
+      <div class="counters"><button @click="resultFilter='';queueOnly=false">全部账户 <b>{{ accounts.length }}</b></button><button @click="resultFilter='';queueOnly=true">检测队列 <b>{{ activeJobs }}</b></button><button class="danger" @click="resultFilter='degraded';queueOnly=false">确认降智 <b>{{ degradedCount }}</b></button><span class="auto-pill" :class="config?.schedule.enabled ? 'on' : 'off'" role="status" :title="autoTitle">{{ config?.schedule.enabled ? `自动检测 · ${autoPeriod}` : '自动检测 · 已关闭' }}</span><span class="next-run" :title="nextRun != null ? `下次自动检测：${date(nextRun)}` : '当前没有待执行的自动检测'">下次检测 <b class="small">{{ runWhen }}</b></span></div>
+      <div class="toolbar"><ZInput v-model="search" class="search" placeholder="搜索名称、邮箱或账户ID" clearable aria-label="搜索账户"><template #prefix><Search :size="16" /></template></ZInput><ZSelect v-model="plan" class="filter" :options="plans" aria-label="订阅类型筛选" /><ZSelect v-model="state" class="filter" :options="statuses" aria-label="账户状态筛选" /><ZSelect v-model="group" class="filter" :options="groups" aria-label="账户分组筛选" /><ZSelect v-model="resultFilter" class="filter" :options="resultOptions" aria-label="检测结果筛选" @change="queueOnly=false" /><div class="commands"><ZButton :disabled="busy" @click="action(loadAccounts)"><template #icon><RefreshCw :size="15" /></template>刷新账户</ZButton><ZButton v-if="manualJobs" :disabled="busy" @click="cancel(undefined,'manual')"><template #icon><Square :size="14" /></template>停止手动队列</ZButton><ZButton v-if="scheduledJobs" :disabled="busy" @click="cancel(undefined,'schedule')"><template #icon><Square :size="14" /></template>停止自动队列</ZButton><ZButton type="primary" :disabled="busy || !chosen.length" @click="openSubmit(chosen.map(a=>a.id))"><template #icon><Play :size="15" /></template>检测所选（{{ chosen.length }}）</ZButton></div></div>
+      <div class="selection"><ZCheckbox :model-value="allPage" :disabled="!pageCandidates.length || busy" label="选择当前页" @change="selectPage" /><span>已选 {{ chosen.length }} 个 · 匹配 {{ filtered.length }} 个</span><ZButton v-if="selected.length" size="small" variant="text" @click="selected=[]">清空选择</ZButton><ZButton v-if="resultFilter || queueOnly" size="small" variant="text" @click="resultFilter='';queueOnly=false">清除结果筛选</ZButton></div>
       <ZTable :columns="columns" :data="visible" :row-key="a=>a.id" :loading="loading" empty-text="没有匹配的账户">
         <template #select="{row}"><ZCheckbox :model-value="selected.includes(row.id)" :disabled="!canDetect(row) || busy" :aria-label="`选择 ${row.email || row.name}`" @change="checked=>selectOne(row.id,checked)" /></template>
         <template #identity="{row}"><div class="identity"><span class="avatar">{{ (row.email || row.name || '?').slice(0,1).toUpperCase() }}</span><div><b>{{ row.email || row.name }}</b><small :title="row.id">{{ row.name }} · {{ row.provider }}</small></div></div></template>
@@ -186,7 +190,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
     <Settings v-if="tab==='settings' && config && banks" :key="settingsKey" :config="config" :revision="revision" :banks="banks" :keys="keys" :accounts="accounts" :groups="allGroups" :selected="selected" :next-due="nextDue" :schedule-error="scheduleError" :busy="busy" @save="save" @bank="bank" @error="error=$event" />
     <template v-if="tab==='history'">
       <div class="section-heading"><div><h2>检测历史</h2><p>保留各轮概率、参数及指纹库版本。</p></div><ZButton :disabled="busy" @click="action(refreshJobs)">刷新</ZButton></div>
-      <div class="toolbar"><ZInput v-model="historySearch" class="search" placeholder="搜索账户" clearable aria-label="搜索历史账户" /><ZSelect v-model="historyVerdict" class="filter" :options="[{value:'',label:'全部结论'},...['degraded','no_match','inconclusive','running','queued','failed','interrupted','cancelled'].map(v=>({value:v,label:verdict(v)}))]" aria-label="历史结论筛选" /></div>
+      <div class="toolbar"><ZInput v-model="historySearch" class="search" placeholder="搜索账户" clearable aria-label="搜索历史账户" /><ZSelect v-model="historyVerdict" class="filter" :options="resultOptions" aria-label="历史结论筛选" /></div>
       <div class="selection"><ZCheckbox :model-value="allHistory" :disabled="!historyCandidates.length || busy" :label="allHistory ? '取消全选' : `全选筛选结果（${historyCandidates.length}）`" @change="selectHistoryAll" /><span>已选 {{ selectedHistory.length }} 条 · 匹配 {{ history.length }} 条</span><ZButton v-if="historySelected.length" size="small" variant="text" @click="historySelected=[]">清空选择</ZButton><ZButton v-if="historyVerdict" size="small" variant="text" @click="historyVerdict=''">清除结论筛选</ZButton><ZButton type="danger" size="small" :disabled="busy || !selectedHistory.length" @click="openDelete(selectedHistory.map(j=>j.id))">删除所选（{{ selectedHistory.length }}）</ZButton></div>
       <ZTable :columns="historyColumns" :data="visibleHistory" :row-key="j=>j.id" empty-text="还没有检测记录">
         <template #select="{row}"><ZCheckbox :model-value="historySelected.includes(row.id)" :disabled="!historyDeletable(row) || busy" :aria-label="`选择 ${row.accountName} 的检测记录 ${date(row.createdAt)}`" @change="checked=>selectHistoryOne(row.id,checked)" /></template>

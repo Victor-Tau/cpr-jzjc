@@ -48,6 +48,111 @@ try {
   await page.getByRole('textbox',{name:'搜索账户',exact:true}).waitFor()
   await page.getByText('未降智',{exact:true}).first().waitFor()
   assert.equal(await page.getByText('未命中降智规则',{exact:true}).count(),0)
+  // Exercise categories against the visible conclusion and latest record.
+  await page.evaluate(()=>{
+    const f=window.__fixture
+    f.resultFilterBackup=structuredClone({jobs:f.bootstrap.jobs,accounts:f.accounts})
+    const base=f.bootstrap.jobs[0], cases=[
+      [0,'completed','degraded'],[2,'completed','inconclusive'],
+      [3,'running','no_match'],[4,'queued','degraded'],[5,'failed','degraded'],
+      [6,'interrupted','no_match'],[7,'cancelled','degraded'],
+      [8,'completed','suspected'],[9,'completed','low_confidence'],
+      [10,'completed','degraded'],[12,'completed','no_match'],[12,'completed','degraded'],
+    ]
+    f.accounts[10].supported=false
+    f.bootstrap.jobs=[...cases.map(([i,status,verdict],n)=>({...base,
+      id:`result-filter-${n}`,accountId:f.accounts[i].id,accountName:f.accounts[i].name,
+      status,verdict,createdAt:Date.now()-n*1000,disableState:'none',groupState:'none',
+    })),base]
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.getByRole('button',{name:'刷新账户',exact:true}).click()
+  const chooseResult = async (label, history=false) => {
+    await page.getByLabel(history?'历史结论筛选':'检测结果筛选',{exact:true}).click()
+    assert.deepEqual(await page.getByRole('option').allTextContents(),['全部检测结果','降智','未降智','其他'])
+    await page.getByRole('option',{name:label,exact:true}).click()
+    await page.getByRole('listbox').waitFor({state:'hidden'})
+  }
+  const accountMatches = n => page.getByText(`匹配 ${n} 个`,{exact:false}).waitFor()
+  await page.getByRole('button',{name:'下一页',exact:true}).click()
+  await chooseResult('降智')
+  await accountMatches(1)
+  assert.deepEqual(await page.locator('tbody .identity b').allTextContents(),['account-0@example.com'])
+  await chooseResult('未降智')
+  await accountMatches(2)
+  assert.deepEqual((await page.locator('tbody .identity b').allTextContents()).sort(),['account-12@example.com','user@example.com'])
+  for(const [label,option] of [['订阅类型筛选','free'],['账户状态筛选','正常'],['账户分组筛选','默认组']]) {
+    await page.getByLabel(label,{exact:true}).click()
+    await page.getByRole('option',{name:option,exact:true}).click()
+    await page.getByRole('listbox').waitFor({state:'hidden'})
+  }
+  await accountMatches(1)
+  await page.getByRole('textbox',{name:'搜索账户',exact:true}).fill('account-12@example.com')
+  await page.getByLabel('选择 account-12@example.com',{exact:true}).locator('..').click()
+  for(const [label,option] of [['订阅类型筛选','全部订阅'],['账户状态筛选','全部账户状态'],['账户分组筛选','全部分组']]) {
+    await page.getByLabel(label,{exact:true}).click()
+    await page.getByRole('option',{name:option,exact:true}).click()
+    await page.getByRole('listbox').waitFor({state:'hidden'})
+  }
+  await page.getByRole('textbox',{name:'搜索账户',exact:true}).fill('')
+  await chooseResult('其他')
+  await accountMatches(40)
+  for(const i of [2,3,4,5,6,7,8,9,10,11]) {
+    await page.getByRole('textbox',{name:'搜索账户',exact:true}).fill(`account-${i}@example.com`)
+    await accountMatches(1)
+  }
+  await page.getByRole('textbox',{name:'搜索账户',exact:true}).fill('account-2@example.com')
+  await page.getByLabel('选择 account-2@example.com',{exact:true}).locator('..').click()
+  await page.getByRole('button',{name:'检测所选（2）',exact:true}).waitFor()
+  await page.getByRole('button',{name:'清空选择',exact:true}).click()
+  await page.getByRole('textbox',{name:'搜索账户',exact:true}).fill('')
+  await page.getByRole('button',{name:/^检测队列/}).click()
+  await accountMatches(2)
+  await chooseResult('降智')
+  await accountMatches(1)
+  await page.screenshot({path:resolve(root,'.cache/result-filter-accounts.png'),fullPage:true})
+  await page.evaluate(()=>{
+    const f=window.__fixture
+    f.bootstrap.jobs[0].verdict='no_match'
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await accountMatches(0)
+  await page.getByText('没有匹配的账户',{exact:true}).waitFor()
+  await chooseResult('未降智')
+  await accountMatches(3)
+  await page.evaluate(()=>{
+    const f=window.__fixture
+    f.bootstrap.jobs[0].verdict='degraded'
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await accountMatches(2)
+  await page.getByRole('button',{name:'确认降智 1',exact:true}).click()
+  await accountMatches(1)
+  await page.getByRole('button',{name:'清除结果筛选',exact:true}).click()
+  await accountMatches(43)
+  await page.getByRole('button',{name:'检测历史',exact:true}).click()
+  for(const [label,count] of [['降智',3],['未降智',2],['其他',8]]) {
+    await chooseResult(label,true)
+    await page.getByText(`已选 0 条 · 匹配 ${count} 条`,{exact:false}).waitFor()
+    assert.equal(await page.locator('tbody tr').count(),count)
+  }
+  await page.getByRole('textbox',{name:'搜索历史账户',exact:true}).fill('acct-5')
+  await page.getByText('已选 0 条 · 匹配 1 条',{exact:false}).waitFor()
+  await page.getByLabel('全选筛选结果（1）',{exact:true}).locator('..').click()
+  await page.getByRole('button',{name:'删除所选（1）',exact:true}).waitFor()
+  await page.getByRole('button',{name:'清空选择',exact:true}).click()
+  await page.getByRole('textbox',{name:'搜索历史账户',exact:true}).fill('')
+  await page.screenshot({path:resolve(root,'.cache/result-filter-history.png'),fullPage:true})
+  await page.getByRole('button',{name:'清除结论筛选',exact:true}).click()
+  await page.evaluate(()=>{
+    const f=window.__fixture
+    f.bootstrap.jobs=f.resultFilterBackup.jobs;f.accounts=f.resultFilterBackup.accounts
+    delete f.resultFilterBackup
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.getByRole('button',{name:'账户检测',exact:true}).click()
+  await page.getByRole('button',{name:'刷新账户',exact:true}).click()
+  await page.getByText('未降智',{exact:true}).first().waitFor()
   const assertNoUsage = async () => {
     assert.equal(await page.locator('.detection-cost').count(),0)
     assert.doesNotMatch(await page.locator('body').innerText(),/费用|待同步/)
@@ -358,5 +463,5 @@ try {
   await assertNoUsage()
   assert.deepEqual(errors,[])
   for(const path of ['api/submit','api/models','api/config','api/banks/check','api/banks/apply','api/banks/rollback','api/report','api/config/preview','api/retry-group'])assert(paths.includes(path),path)
-  console.log(JSON.stringify({ui:'passed',checks:['usage display and polling removed','unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','history select all and batch delete','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','scheduled subscription multi-select','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','stale receiving progress expires','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
+  console.log(JSON.stringify({ui:'passed',checks:['three result categories in accounts and history','latest result and unfinished stale verdict classification','combined result/search/subscription/status/group filters','result filtering resets pagination and preserves selection','queue shortcuts, clear filters and live category updates','history category search and selection','usage display and polling removed','unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','history select all and batch delete','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','scheduled subscription multi-select','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','stale receiving progress expires','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
 } finally {await browser.close()}

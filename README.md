@@ -8,11 +8,17 @@
 
 在宿主「插件管理 → 安装插件 → 上传包」上传：
 
-`dist/personal.modeltrace-health-1.8.0-x86_64-unknown-linux-gnu.tar.gz`
+`dist/personal.modeltrace-health-1.8.1-x86_64-unknown-linux-gnu.tar.gz`
 
 启用后打开「账号降智检测」，进入「参数配置」选择已有计量 Key，保存后即可单号或批量检测。检测请求由宿主按指定账户 ID 执行，使用该账户绑定的代理并计入所选 Key。Key 的账户分组和模型权限仍由宿主校验。页面仅接收 Key ID 和名称。
 
 运行时首次检测会解出约91MB文件，目标目录需可写、可执行并有足够空间。自动跳过 `noexec` 临时目录，解包失败时清理残留并尝试 `/var/tmp`，兼容 Docker 中仅64MB且禁止执行的 `/tmp`。可用宿主进程的 `MODELTRACE_RUNTIME_DIR` 指定首选目录，或用 `TMPDIR` 修改系统临时目录。解包不恢复不必要的文件时间戳；异常会显示具体条目和系统错误。
+
+### 1.8.1 检测结果筛选
+
+- 账户检测新增「检测结果」下拉框，支持降智、未降智、其他；默认显示全部，可与搜索、订阅、账户状态和分组筛选组合使用。
+- 按账户最新一条检测记录归类：已完成且确认降智为「降智」，已完成且未降智为「未降智」；未检测、暂不支持、排队、检测中、失败、中断、取消和证据不足等归入「其他」。检测历史按每条记录使用相同三类。
+- 切换筛选自动回到第一页；顶部检测队列与确认降智快捷筛选、跨页选择和批量操作继续可用。
 
 ### 1.8.0 CPR 3.32.0 SDK 与长调用预算
 
@@ -134,7 +140,7 @@
 
 ## 使用
 
-- **账户检测**：列出全部账户；按订阅、状态和分组组合筛选，搜索名称、邮箱或账户ID。支持10/20/50/100条分页、勾选当前页、跨页批量检测。首版检测OpenAI账户；其他提供方会显示不支持。
+- **账户检测**：列出全部账户；按订阅、状态、分组和检测结果组合筛选，搜索名称、邮箱或账户ID。支持10/20/50/100条分页、勾选当前页、跨页批量检测。首版检测OpenAI账户；其他提供方会显示不支持。
 - **参数配置**：一套全局配置，手动和定时共用。请求模型支持目录选择与手动输入；支持计量Key、temperature、推理强度、输出上限、超时、降级名单、别名和阈值配置。宿主不接受的请求参数会终止本次任务并显示错误类别。
 - **检测历史**：查看每轮全部候选概率、家族概率、触发原因、请求ID、配置快照和指纹库版本。自动保留最近3天，不限制记录条数；可全选当前筛选结果批量删除，也可逐条删除。删除历史不会恢复已停用账户。
 
@@ -213,7 +219,7 @@ cargo build --manifest-path backend/Cargo.toml --locked
 .venv/bin/python scripts/build_runtime.py
 cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu.2.36
 cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
-.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.8.0-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.8.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 基础镜像已缓存时可向 `build_runtime.py` 传 `--base-tar /path/python-base.tar`。脚本验证固定镜像配置、各镜像层和NumPy wheel哈希，不依赖Docker守护进程。`scripts/package.sh` 可串联构建和校验，需在已激活的开发环境运行。
