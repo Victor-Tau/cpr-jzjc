@@ -13,6 +13,7 @@ import sys
 import time
 import threading
 import unittest
+from urllib.parse import parse_qsl, urlencode
 
 ROOT=Path(__file__).resolve().parents[1]
 BINARY=ROOT/"backend/target/debug/modeltrace-health"
@@ -117,15 +118,31 @@ class Host:
                     if delay and is_stream and not persistent_delay:self.model_read_delay=delay
             elif meta.get('id')==i:
                 if meta['type']=='error':raise AssertionError(meta['error'])
+                if method=='management.handle':
+                    assert 200 <= data['status'] <= 599, data
+                    assert data['content_type']=='application/json', data
+                    assert len(body)<=1024*1024, f'CPR rejects management body: {len(body)} bytes > 1 MiB'
                 return data,body
             else:raise AssertionError(meta)
 
     def request(self,path,body=None,ok=True):
-        path,_,query=path.partition('?');data,payload=self.call('management.handle',{'method':'GET' if body is None else 'POST','path':path,'query':query,'content_type':None if body is None else 'application/json','headers':[]},b'' if body is None else raw(body))
-        result=json.loads(payload)
-        if ok:assert data['status']==200,result
-        else:assert data['status']!=200,result
-        return result
+        path,_,query=path.partition('?');params=dict(parse_qsl(query));merged=None;previous=0
+        while True:
+            data,payload=self.call('management.handle',{'method':'GET' if body is None else 'POST','path':path,'query':urlencode(params),'content_type':None if body is None else 'application/json','headers':[]},b'' if body is None else raw(body))
+            result=json.loads(payload)
+            if ok:assert data['status']==200,result
+            else:assert data['status']!=200,result
+            page=result.get('pagination')
+            if page is None:return result
+            if merged is None:merged=result
+            else:
+                assert merged['pagination']['snapshot']==page['snapshot']
+                merged[page['field']].extend(result[page['field']])
+            offset=page['nextOffset']
+            if offset is None:
+                del merged['pagination'];return merged
+            assert offset>previous
+            previous=offset;params.update(pageOffset=offset,pageSnapshot=page['snapshot'])
 
     def tick(self,n=1,budget_ms=30000):
         # 旧回归有意保留 30 秒短预算；新预算用例使用 ready 中协商的值。
@@ -667,6 +684,44 @@ class Integration(unittest.TestCase):
         self.assertNotIn(('jobs',old),self.host.state)
         self.host.request('api/report?id='+old,ok=False)
         jobs=self.host.request('api/jobs')['jobs'];self.assertIn(submitted,[j['id'] for j in jobs]);self.assertEqual(len(jobs),501)
+
+    def test_large_history_management_responses_stay_within_host_limit(self):
+        self.config(lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();self.host.tick(2)
+        self.host.close();state=copy.deepcopy(self.host.state)
+        template=state[('jobs',identity)]['value']
+        now_ms=int(time.time()*1000);ids=[]
+        for i in range(1200):
+            job_id=f'large-history-{i:04d}';job=copy.deepcopy(template)
+            job.update(id=job_id,message='历史检测结果与错误详情'*60,createdAt=now_ms-1000,finishedAt=now_ms-500)
+            state[('jobs',job_id)]={'value':job,'version':1,'schema_version':1};ids.append(job_id)
+        state[('control','main')]['value']['jobIds']=[identity,*ids]
+        self.host=Host(state=state);self.addCleanup(self.host.close)
+        expected=[*reversed(ids),identity]
+        for path in ['api/bootstrap','api/jobs','api/progress']:
+            result=self.host.request(path)
+            self.assertEqual([j['id'] for j in result['jobs']],expected)
+        unchanged=self.host.request('api/progress?since='+result['revision'])
+        self.assertFalse(unchanged['changed']);self.assertIsNone(unchanged['jobs'])
+        self.assertEqual(self.host.request('api/report?id='+ids[-1])['message'],'历史检测结果与错误详情'*60)
+        self.assertEqual(len(self.host.state),len(state))
+        _,payload=self.host.call('management.handle',{'method':'GET','path':'api/jobs','query':'','content_type':None,'headers':[]})
+        page=json.loads(payload)['pagination']
+        self.host.request('api/delete',{'id':ids[-1]})
+        data,payload=self.host.call('management.handle',{'method':'GET','path':'api/jobs',
+            'query':urlencode({'pageOffset':page['nextOffset'],'pageSnapshot':page['snapshot']}),
+            'content_type':None,'headers':[]})
+        self.assertEqual(data['status'],409)
+        self.assertEqual(json.loads(payload)['error']['code'],'pagination_changed')
+        self.assertEqual(len(self.host.request('api/jobs')['jobs']),1200)
+
+    def test_large_account_page_stays_within_host_limit(self):
+        self.host.additional_accounts=[{'id':f'large-account-{i:04d}','name':'长账户名称'*200,
+            'provider':'openai','enabled':True,'status':'normal','planType':'plus','groups':[]}
+            for i in range(499)]
+        accounts=self.host.request('api/accounts')['accounts']
+        self.assertEqual(len(accounts),500)
+        self.assertEqual(len({a['id'] for a in accounts}),500)
 
     def test_binding_idempotency_and_completed_scoring(self):
         self.config(degradedModels=['gpt-5.6-luna'],lowConfidencePercent=0,degradedPercent=100)

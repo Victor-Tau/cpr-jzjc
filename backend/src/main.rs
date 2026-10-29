@@ -2,6 +2,7 @@ mod banks;
 mod domain;
 mod engine;
 mod host;
+mod management;
 mod manager;
 mod progress;
 use gateway_plugin_sdk::{
@@ -271,6 +272,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let progress = progress.clone();
             let reload_signal = management_reload.clone();
             async move {
+                let method = call.request.method.clone();
+                let request_query = call.request.query.clone();
                 let query = |key: &str| {
                     url::form_urlencoded::parse(call.request.query.as_bytes())
                         .find(|(k, _)| k == key)
@@ -331,16 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     result
                 };
-                let (status, v) = match result {
-                    Ok(v) => (200, v),
-                    Err(e) => (400, json!({"error":{"message":e.message}})),
-                };
-                Ok(TypedReply::new(ManagementResponse {
-                    status,
-                    content_type: "application/json".into(),
-                    headers: vec![],
-                })
-                .with_payload(serde_json::to_vec(&v).map_err(|_| host::fault("响应编码失败"))?))
+                management::reply(result, &method, &request_query)
             }
         })?
         .on(methods::RECONCILE, move |call| {

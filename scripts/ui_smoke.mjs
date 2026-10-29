@@ -22,7 +22,10 @@ try {
       window.__calls.push(input)
       const b=f.bootstrap;let result={ok:true}
       if(input.path==='api/bootstrap')result=b
-      else if(input.path==='api/accounts')result={accounts:f.accounts,nextOffset:null}
+      else if(input.path==='api/accounts'){
+        const offset=Number(new URLSearchParams(input.query).get('pageOffset')||0),end=Math.min(offset+13,f.accounts.length)
+        result={accounts:f.accounts.slice(offset,end),nextOffset:null,pagination:{field:'accounts',snapshot:'ui-accounts',nextOffset:end<f.accounts.length?end:null}}
+      }
       else if(input.path==='api/progress'){const revision='ui:'+f.revision,changed=new URLSearchParams(input.query).get('since')!==revision;result={revision,changed,jobs:changed?b.jobs:null,nextDue:b.nextDue,scheduleError:null}}
       else if(input.path==='api/jobs')result={jobs:b.jobs,banks:b.banks,nextDue:b.nextDue,scheduleError:null}
       else if(input.path==='api/report')result=f.report
@@ -50,6 +53,7 @@ try {
   assert.equal(await page.getByText('未命中降智规则',{exact:true}).count(),0)
   assert.match(await page.getByLabel('每页条数',{exact:true}).innerText(),/100 条\/页/)
   assert.equal(await page.locator('tbody .identity b').count(),fixture.accounts.length)
+  assert(await page.evaluate(()=>window.__calls.some(c=>c.path==='api/accounts' && new URLSearchParams(c.query).has('pageSnapshot'))))
   await page.getByLabel('每页条数',{exact:true}).click()
   await page.getByRole('option',{name:'20 条/页',exact:true}).click()
   await page.getByRole('listbox').waitFor({state:'hidden'})

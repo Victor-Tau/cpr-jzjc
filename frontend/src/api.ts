@@ -4,11 +4,42 @@ export async function request<T>(method: string, path: string, body?: unknown): 
   const host = window.codexProxyPlugin
   if (!host || host.version !== 2) throw new Error('请从 Codex Proxy RS 的插件页面打开')
   const [route, query] = path.split('?')
-  const reply = await host.request({ method, path: route!, query, ...(body === undefined ? {} : { contentType: 'application/json', body: JSON.stringify(body) }) })
-  let value: any
-  try { value = JSON.parse(new TextDecoder().decode(reply.body)) } catch { throw new Error('插件响应格式无效') }
-  if (reply.status < 200 || reply.status >= 300) throw new Error(value?.error?.message || `请求失败（HTTP ${reply.status}）`)
-  return value as T
+  // 大列表按正文大小分页；快照变化时从头读取，避免进度刷新拼接不同版本的数据。
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const params = new URLSearchParams(query)
+    let merged: any
+    let previousOffset = 0
+    let snapshot: string | undefined
+    let field: string | undefined
+    while (true) {
+      const reply = await host.request({ method, path: route!, query: params.toString(), ...(body === undefined ? {} : { contentType: 'application/json', body: JSON.stringify(body) }) })
+      let value: any
+      try { value = JSON.parse(new TextDecoder().decode(reply.body)) } catch { throw new Error('插件响应格式无效') }
+      if (reply.status === 409 && value?.error?.code === 'pagination_changed' && method === 'GET') break
+      if (reply.status < 200 || reply.status >= 300) throw new Error(value?.error?.message || `请求失败（HTTP ${reply.status}）`)
+      const page = value.pagination
+      if (!page) {
+        if (merged) throw new Error('插件分页响应无效')
+        return value as T
+      }
+      if (method !== 'GET' || !['jobs', 'accounts', 'models'].includes(page.field) || !Array.isArray(value[page.field]) || typeof page.snapshot !== 'string') throw new Error('插件分页响应无效')
+      if (!merged) {
+        merged = value; snapshot = page.snapshot; field = page.field
+      } else {
+        if (page.snapshot !== snapshot || page.field !== field) throw new Error('插件分页快照无效')
+        merged[field!].push(...value[field!])
+      }
+      if (page.nextOffset === null) {
+        delete merged.pagination
+        return merged as T
+      }
+      if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= previousOffset) throw new Error('插件分页未前进，请刷新')
+      previousOffset = page.nextOffset
+      params.set('pageOffset', String(page.nextOffset))
+      params.set('pageSnapshot', snapshot!)
+    }
+  }
+  throw new Error('数据正在更新，请稍后重试')
 }
 export interface Bootstrap { config: Config; configRevision: number; groups: Group[]; keys: { id: string; name: string }[]; jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null }
 export const api = {
