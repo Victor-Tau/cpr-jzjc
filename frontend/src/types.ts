@@ -1,7 +1,7 @@
 export interface Filter { plan: string; plans: string[]; status: string; group: string; keyword: string }
 export interface Config {
   requestModel: string; keyId: string; temperature: number | null; reasoningEffort: string; maxOutputTokens: number; timeoutSeconds: number;
-  degradedModels: string[]; aliases: Record<string, string>; lowConfidencePercent: number; degradedPercent: number; confirmationRounds: number;
+  degradedModels: string[]; triggerErrorCodes: number[]; aliases: Record<string, string>; lowConfidencePercent: number; degradedPercent: number; confirmationRounds: number;
   lowConfidenceRetries: number; retryDelaySeconds: number; autoDisable: boolean; autoMoveGroup: boolean; targetGroupId: string; retentionDays: number;
   schedule: { enabled: boolean; kind: string; intervalMinutes: number; time: string; timezone: string; scope: string; accountIds: string[]; filter: Filter };
   autoCheckUpdates: boolean; updateIntervalHours: number; mirrorPrefix: string; maxConcurrency: number;

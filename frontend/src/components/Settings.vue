@@ -28,7 +28,7 @@ const exportedJson = ref('')
 const exportedField = ref<HTMLTextAreaElement>()
 const targetOptions = computed(() => props.groups.map(g => ({ value:g.id, label:g.name })))
 function useDefaults() {
-  Object.assign(cfg.value, {lowConfidencePercent:20, degradedPercent:90, confirmationRounds:1, lowConfidenceRetries:1, retryDelaySeconds:10, retentionDays:3})
+  Object.assign(cfg.value, {lowConfidencePercent:20, degradedPercent:90, confirmationRounds:1, lowConfidenceRetries:1, retryDelaySeconds:10, retentionDays:3, triggerErrorCodes:[]})
   fileNotice.value='已填入 1.4 默认规则，保存后生效。'
 }
 function exportConfig() {
@@ -86,6 +86,7 @@ function save() {
     mapping[line.slice(0,i).trim()] = line.slice(i+1).trim()
   }
   cfg.value.aliases = mapping
+  cfg.value.triggerErrorCodes = [...new Set(cfg.value.triggerErrorCodes.map(Number).filter(Number.isInteger))]
   if (cfg.value.schedule.filter.plans.length) cfg.value.schedule.filter.plan = ''
   emit('save', JSON.parse(JSON.stringify(cfg.value)))
 }
@@ -114,6 +115,7 @@ function save() {
         <label>连续确认轮数<input type="number" min="1" max="5" :value="cfg.confirmationRounds" @input="number($event,'confirmationRounds')"></label>
         <label>低置信度额外复测次数<input type="number" min="0" max="5" :value="cfg.lowConfidenceRetries" @input="number($event,'lowConfidenceRetries')"></label>
         <label>复测与失败重试间隔（秒）<input type="number" min="0" max="3600" :value="cfg.retryDelaySeconds" @input="number($event,'retryDelaySeconds')"></label>
+        <label class="wide">请求日志触发错误码<input :value="cfg.triggerErrorCodes.join(', ')" placeholder="例如 503, 429" @input="cfg.triggerErrorCodes = ($event.target as HTMLInputElement).value.split(/[,，\s]+/).filter(Boolean).map(Number)"><small>读取 CPR 请求日志，匹配错误码后立即为对应账户排队检测；留空关闭。错误码支持 100 至 599。</small></label>
         <div class="field"><span>历史保留</span><small>自动保存最近3天，过期记录在提交检测和后台维护时清理；不限制记录条数，仅受宿主存储预算约束。</small></div>
         <label class="wide">模型别名（每行：请求名称=指纹库模型ID）<textarea v-model="aliases" rows="3" placeholder="my-luna=gpt-5.6-luna" /></label>
       </div>

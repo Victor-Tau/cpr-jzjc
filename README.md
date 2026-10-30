@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/Victor-Tau/cpr-jzjc)](https://github.com/Victor-Tau/cpr-jzjc/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CPR: 3.35.x](https://img.shields.io/badge/CPR-3.35.x-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs)
+[![CPR: 3.36.x](https://img.shields.io/badge/CPR-3.36.x-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs)
 
 在 **Codex Proxy RS（CPR）** 管理页面中，批量检测账户的模型输出、查看指纹匹配结果，并按自定义规则执行复测、定时检查和账户处理。
 
@@ -17,6 +17,7 @@
 | 单号与批量检测 | 支持 OpenAI 账户，按订阅、状态、分组、关键词和检测结果筛选；并行数可设为 1–16 |
 | 自动复测 | 配置置信度阈值、降级模型名单和连续确认轮数，低置信度结果可自动复测 |
 | 定时检查 | 按固定间隔或指定时区的每日时刻执行，支持动态筛选范围和固定账户列表 |
+| 请求日志触发 | 配置 503 等错误码，匹配 CPR 请求日志后自动为对应账户排队检测 |
 | 检测报告 | 查看每轮候选模型概率、家族概率、请求记录、配置快照与指纹库版本 |
 | 确认后处理 | 可分别开启关闭账户调度、移入指定分组；操作失败可单独重试 |
 | 指纹库更新 | 检查并应用上游指纹库，支持回退上一版本和恢复内置库 |
@@ -41,8 +42,8 @@
 
 | 项目 | 当前发布版本要求 |
 | --- | --- |
-| 插件版本 | **1.10.0** |
-| CPR 宿主 | **>=3.35.0、<3.36.0** |
+| 插件版本 | **1.11.0** |
+| CPR 宿主 | **>=3.36.0、<3.37.0** |
 | 平台 | **Linux x86_64，glibc 2.36+** |
 | 运行模式 | `trustedProcess` |
 | 评分运行时 | 已包含私有 Python/NumPy，无需另装系统 Python 或部署 ModelTrace 服务 |
@@ -51,7 +52,7 @@
 
 ### 首次安装
 
-1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载 `personal.modeltrace-health-1.10.0-x86_64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
+1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载 `personal.modeltrace-health-1.11.0-x86_64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
 2. 在 CPR 中打开「插件管理 → 安装插件 → 上传包」，上传下载的安装包并启用。
 3. 打开「账号降智检测 → 参数配置」，选择已有计量 Key，确认请求模型及判定规则，点击「保存全部参数」。
 4. 回到「账户检测」，先选择一个账户执行检测，在报告中查看结果，再按需启用批量检测或定时检查。
@@ -66,7 +67,7 @@
 
 在宿主插件管理中上传新版本包，更新并切换**现有插件实例**。同实例升级保留配置、计划、检测历史和指纹库；升级前也可在「参数配置 → 配置备份」导出配置。
 
-[1.10.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.10.0) 适配 CPR 3.35，并修复大列表导致的「插件管理响应状态、内容类型或正文无效」。详细变更见 [CHANGELOG](CHANGELOG.md)。
+[1.11.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.11.0) 适配 CPR 3.36，并支持按请求日志错误码自动触发检测。详细变更见 [CHANGELOG](CHANGELOG.md)。
 
 ## 如何理解结果
 

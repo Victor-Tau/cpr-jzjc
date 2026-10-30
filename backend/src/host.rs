@@ -208,6 +208,98 @@ pub async fn accounts(host: &HostClient) -> Result<Vec<Account>, PluginFault> {
     Err(fault("账户数量超过100000"))
 }
 
+#[derive(Clone, Debug)]
+pub struct RequestLog {
+    pub key: String,
+    pub account_id: Option<String>,
+    pub account_name: Option<String>,
+    pub code: Option<u16>,
+}
+
+fn value_string(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_u64().map(|n| n.to_string()))
+}
+
+fn value_code(value: &Value) -> Option<u16> {
+    value
+        .as_u64()
+        .and_then(|n| u16::try_from(n).ok())
+        .or_else(|| value.as_str()?.trim().parse().ok())
+}
+
+/// Reads the most recent request records exposed by CPR 3.36. Field names are
+/// accepted in both API casing styles because deployments may proxy older
+/// response serializers.
+pub async fn request_logs(host: &HostClient) -> Result<Vec<RequestLog>, PluginFault> {
+    let data = admin(
+        host,
+        "GET",
+        "/api/admin/usage/records?currentPage=1&pageSize=100&status=all&period=today",
+        None,
+    )
+    .await?;
+    let items = data["items"]
+        .as_array()
+        .or_else(|| data["records"].as_array())
+        .or_else(|| data.as_array())
+        .ok_or_else(|| fault("请求日志格式无效"))?;
+    let mut result = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let account = item.get("account").unwrap_or(&Value::Null);
+        let account_id = value_string(
+            item.get("accountId")
+                .or_else(|| item.get("account_id"))
+                .unwrap_or(&Value::Null),
+        )
+        .or_else(|| value_string(account.get("id").unwrap_or(&Value::Null)));
+        let account_name = value_string(
+            item.get("accountName")
+                .or_else(|| item.get("account_name"))
+                .unwrap_or(&Value::Null),
+        )
+        .or_else(|| value_string(account.get("name").unwrap_or(&Value::Null)));
+        let code = value_code(
+            item.get("errorCode")
+                .or_else(|| item.get("error_code"))
+                .unwrap_or(&Value::Null),
+        )
+        .or_else(|| {
+            value_code(
+                item.get("statusCode")
+                    .or_else(|| item.get("status_code"))
+                    .unwrap_or(&Value::Null),
+            )
+        })
+        .or_else(|| {
+            item.get("error")
+                .and_then(|e| value_code(e.get("code").unwrap_or(&Value::Null)))
+        });
+        let id = value_string(
+            item.get("id")
+                .or_else(|| item.get("requestId"))
+                .or_else(|| item.get("request_id"))
+                .unwrap_or(&Value::Null),
+        )
+        .unwrap_or_else(|| serde_json::to_string(item).unwrap_or_else(|_| index.to_string()));
+        let key = format!(
+            "{}:{}:{}",
+            id,
+            account_id.as_deref().unwrap_or_default(),
+            code.unwrap_or_default()
+        );
+        result.push(RequestLog {
+            key,
+            account_id,
+            account_name,
+            code,
+        });
+    }
+    Ok(result)
+}
+
 pub async fn groups(host: &HostClient) -> Result<Vec<Group>, PluginFault> {
     let mut result = vec![];
     let mut seen = BTreeSet::new();

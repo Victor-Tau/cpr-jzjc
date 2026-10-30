@@ -32,6 +32,9 @@ pub struct Control {
     pub schedule_error: Option<String>,
     pub last_schedule_at: Option<u64>,
     pub pending_schedule: Option<String>,
+    /// Request-log records already considered by the automatic trigger.
+    #[serde(default)]
+    pub error_trigger_seen: Vec<String>,
 }
 impl Default for Control {
     fn default() -> Self {
@@ -49,6 +52,7 @@ impl Default for Control {
             schedule_error: None,
             last_schedule_at: None,
             pending_schedule: None,
+            error_trigger_seen: vec![],
         }
     }
 }
@@ -850,6 +854,7 @@ impl Manager {
         self.load(host).await?;
         self.recover_interrupted(host).await?;
         self.prune(host).await?;
+        self.poll_error_triggers(host).await?;
         for i in 0..self.jobs.len() {
             if self.jobs[i].0.active() && self.progress.is_cancelled(&self.jobs[i].0.id) {
                 self.jobs[i]
@@ -895,7 +900,7 @@ impl Manager {
             self.control.last_schedule_at = Some(now());
             self.control.next_due = Some(next_due(&self.control.config.schedule, now()));
             self.control.pending_schedule = None;
-            return self.save(host).await;
+            self.save(host).await?;
         }
         let mut visited = BTreeSet::new();
         loop {
@@ -1057,6 +1062,79 @@ impl Manager {
                 return self.check_update(host).await;
             }
             self.gc_banks(host).await?;
+        }
+        Ok(())
+    }
+
+    /// Poll CPR's request log and enqueue the normal detection workflow for
+    /// accounts whose configured error code was observed. The endpoint was
+    /// added in CPR 3.36; an unavailable log endpoint is intentionally
+    /// non-fatal so existing manual and scheduled checks keep working.
+    async fn poll_error_triggers(&mut self, host: &HostClient) -> Result<(), PluginFault> {
+        let codes = &self.control.config.trigger_error_codes;
+        if codes.is_empty() || self.remaining() < std::time::Duration::from_secs(3) {
+            return Ok(());
+        }
+        let records = match host::request_logs(host).await {
+            Ok(records) => records,
+            Err(_) => return Ok(()),
+        };
+        if records.is_empty() {
+            return Ok(());
+        }
+        let accounts = match host::accounts(host).await {
+            Ok(accounts) => accounts,
+            Err(_) => return Ok(()),
+        };
+        let mut candidates = std::collections::BTreeMap::<String, String>::new();
+        let mut changed = false;
+        for record in records {
+            if self
+                .control
+                .error_trigger_seen
+                .iter()
+                .any(|key| key == &record.key)
+            {
+                continue;
+            }
+            self.control.error_trigger_seen.push(record.key.clone());
+            changed = true;
+            let Some(code) = record.code else { continue };
+            if !codes.contains(&code) {
+                continue;
+            }
+            let account = record
+                .account_id
+                .as_deref()
+                .and_then(|id| accounts.iter().find(|a| a.id == id))
+                .or_else(|| {
+                    record.account_name.as_deref().and_then(|name| {
+                        accounts.iter().find(|a| {
+                            a.id == name || a.name == name || a.email.as_deref() == Some(name)
+                        })
+                    })
+                });
+            let Some(account) = account.filter(|a| a.enabled && a.supported) else {
+                continue;
+            };
+            candidates.entry(account.id.clone()).or_insert(record.key);
+        }
+        if self.control.error_trigger_seen.len() > 512 {
+            let keep_from = self.control.error_trigger_seen.len() - 512;
+            self.control.error_trigger_seen.drain(..keep_from);
+        }
+        for (account_id, key) in candidates {
+            let _ = self
+                .submit(
+                    host,
+                    vec![account_id],
+                    &format!("request-log-{key}"),
+                    "error_code",
+                )
+                .await;
+        }
+        if changed {
+            self.save(host).await?;
         }
         Ok(())
     }

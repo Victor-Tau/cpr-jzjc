@@ -52,6 +52,9 @@ pub struct Config {
     pub max_output_tokens: u32,
     pub timeout_seconds: u64,
     pub degraded_models: Vec<String>,
+    /// Request-log error codes that should enqueue an immediate detection.
+    #[serde(default)]
+    pub trigger_error_codes: Vec<u16>,
     pub aliases: BTreeMap<String, String>,
     pub low_confidence_percent: f64,
     pub degraded_percent: f64,
@@ -82,6 +85,7 @@ impl Default for Config {
             max_output_tokens: 4096,
             timeout_seconds: 120,
             degraded_models: vec!["gpt-5.6-luna".into()],
+            trigger_error_codes: vec![],
             aliases: BTreeMap::new(),
             low_confidence_percent: 20.0,
             degraded_percent: 90.0,
@@ -151,6 +155,14 @@ impl Config {
             || self.aliases.len() > 64
         {
             return Err("请配置1至32个降级模型，别名最多64条".into());
+        }
+        if self.trigger_error_codes.len() > 32
+            || self
+                .trigger_error_codes
+                .iter()
+                .any(|code| !(100..=599).contains(code))
+        {
+            return Err("请求日志触发错误码须为100至599，最多32项".into());
         }
         let mut referenced = self.degraded_models.clone();
         referenced.extend(self.aliases.values().cloned());
@@ -520,6 +532,17 @@ mod tests {
         assert_eq!(j.classify(&score("gpt-5.6-luna", 0.95)), "degraded");
         assert_eq!(j.classify(&score("gpt-6-sol", 0.95)), "no_match");
         assert_eq!(j.consecutive, 0);
+    }
+    #[test]
+    fn request_log_error_codes_are_bounded() {
+        let mut cfg = Config::default();
+        let models = vec!["gpt-5.6-luna".to_string(), "gpt-6.1-sol".to_string()];
+        cfg.trigger_error_codes = vec![503, 429];
+        assert!(cfg.validate(&models).is_ok());
+        cfg.trigger_error_codes = vec![99];
+        assert!(cfg.validate(&models).is_err());
+        cfg.trigger_error_codes = vec![600];
+        assert!(cfg.validate(&models).is_err());
     }
     #[test]
     fn v14_defaults_and_legacy_records() {
