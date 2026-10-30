@@ -97,7 +97,7 @@ cpr-plugin package --manifest plugin.json \
   --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health \
   --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
 python scripts/verify_artifact.py \
-  dist/personal.modeltrace-health-1.11.0-x86_64-unknown-linux-gnu.tar.gz
+  dist/personal.modeltrace-health-1.11.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 运行时脚本验证固定基础镜像配置、镜像层和 NumPy wheel 摘要，不依赖 Docker 守护进程。已有由 crane 拉取的基础归档时，可传入 `--base-tar /path/to/python-base.tar`。

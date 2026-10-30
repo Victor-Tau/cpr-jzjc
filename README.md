@@ -42,7 +42,7 @@
 
 | 项目 | 当前发布版本要求 |
 | --- | --- |
-| 插件版本 | **1.11.0** |
+| 插件版本 | **1.11.1** |
 | CPR 宿主 | **>=3.36.0、<3.37.0** |
 | 平台 | **Linux x86_64，glibc 2.36+** |
 | 运行模式 | `trustedProcess` |
@@ -52,7 +52,7 @@
 
 ### 首次安装
 
-1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载 `personal.modeltrace-health-1.11.0-x86_64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
+1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载 `personal.modeltrace-health-1.11.1-x86_64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
 2. 在 CPR 中打开「插件管理 → 安装插件 → 上传包」，上传下载的安装包并启用。
 3. 打开「账号降智检测 → 参数配置」，选择已有计量 Key，确认请求模型及判定规则，点击「保存全部参数」。
 4. 回到「账户检测」，先选择一个账户执行检测，在报告中查看结果，再按需启用批量检测或定时检查。
@@ -67,7 +67,7 @@
 
 在宿主插件管理中上传新版本包，更新并切换**现有插件实例**。同实例升级保留配置、计划、检测历史和指纹库；升级前也可在「参数配置 → 配置备份」导出配置。
 
-[1.11.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.11.0) 适配 CPR 3.36，并支持按请求日志错误码自动触发检测。详细变更见 [CHANGELOG](CHANGELOG.md)。
+[1.11.1](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.11.1) 修复 GitHub Release 摘要缓存导致的安装校验问题。详细变更见 [CHANGELOG](CHANGELOG.md)。
 
 ## 如何理解结果
 
