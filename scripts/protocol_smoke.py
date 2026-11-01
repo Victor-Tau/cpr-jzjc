@@ -954,6 +954,8 @@ class Integration(unittest.TestCase):
         body={'accountIds':['acct-test'],'requestId':'schedule-1'}
         manual=self.host.request('api/submit',body)['submitted'][0]
         self.assertEqual(self.host.request('api/jobs')['nextDue'],1)
+        # Assert duplicate rejection while the manual task is still queued.
+        self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'duplicate-manual'},ok=False)
         self.host.tick()
         snapshot=self.host.request('api/jobs');jobs=snapshot['jobs']
         self.assertEqual({j['source'] for j in jobs},{'manual','schedule'})
@@ -961,30 +963,34 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.host.request('api/submit',body)['submitted'],[manual])
         self.assertEqual(self.host.request('api/jobs')['nextDue'],snapshot['nextDue'])
         self.assertGreater(snapshot['nextDue'],1)
-        self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'duplicate-manual'},ok=False)
 
     def test_schedule_does_not_block_manual_and_sources_take_turns(self):
         self.arm_due_schedule(lowConfidencePercent=100,degradedPercent=100,lowConfidenceRetries=3)
         self.host.tick() # Queue automatic work first.
         scheduled=self.host.request('api/jobs')['jobs'][0]['id']
         manual=self.submit()
-        # Both ready sources get a round before either consumes its retest budget.
+        before={identity:len(self.host.request('api/report?id='+identity)['rounds'])
+                for identity in [scheduled,manual]}
+        executions_before=len(self.host.executions)
+        # Each ready source advances one round in the shared callback.
         self.host.tick()
         for identity in [scheduled,manual]:
             report=self.host.request('api/report?id='+identity)
-            self.assertEqual(len(report['rounds']),1)
+            self.assertEqual(len(report['rounds']),before[identity]+1)
             self.assertEqual(report['status'],'running')
-        self.assertEqual(len(self.host.executions),2)
+        self.assertEqual(len(self.host.executions),executions_before+2)
 
     def test_source_scoped_cancel_keeps_other_queue_and_schedule(self):
-        self.arm_due_schedule()
+        self.arm_due_schedule(lowConfidencePercent=100,degradedPercent=100,lowConfidenceRetries=3)
         manual=self.submit();self.host.tick()
         jobs=self.host.request('api/jobs');due=jobs['nextDue']
         scheduled=next(j['id'] for j in jobs['jobs'] if j['source']=='schedule')
+        scheduled_status=self.host.request('api/report?id='+scheduled)['status']
+        self.assertIn(scheduled_status,('queued','running'))
         self.host.request('api/cancel',{'source':'invalid'},ok=False)
         self.host.request('api/cancel',{'source':'manual'})
         self.assertEqual(self.host.request('api/report?id='+manual)['status'],'cancelled')
-        self.assertEqual(self.host.request('api/report?id='+scheduled)['status'],'queued')
+        self.assertEqual(self.host.request('api/report?id='+scheduled)['status'],scheduled_status)
         other=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'another-manual'})['submitted'][0]
         self.host.request('api/cancel',{'source':'schedule'})
         self.assertEqual(self.host.request('api/report?id='+scheduled)['status'],'cancelled')

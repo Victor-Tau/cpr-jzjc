@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@codex-proxy/ui':
-        specifier: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz
-        version: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz(vite@8.3.0(@types/node@26.5.1)(jiti@2.7.0))(vue@3.5.42(typescript@6.0.3))
+        specifier: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.8.0/codex-proxy-ui-0.8.0.tgz
+        version: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.8.0/codex-proxy-ui-0.8.0.tgz(jiti@2.7.0)(postcss@8.5.30)(vite@8.3.0(@types/node@26.5.1)(jiti@2.7.0))(vue@3.5.42(typescript@6.0.3))
       '@lucide/vue':
         specifier: 1.47.0
         version: 1.47.0(vue@3.5.42(typescript@6.0.3))
@@ -70,9 +70,9 @@ packages:
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
 
-  '@codex-proxy/ui@https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz':
-    resolution: {integrity: sha512-eYc0/C0ILOvxAFzNYpB6TfJGkgRnPr3v2qpm7GDEQo9mfLeH8CNlIOYw9/VQf/OeRF/xzQVZOt1BYtp2yA4SKQ==, tarball: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz}
-    version: 0.7.0
+  '@codex-proxy/ui@https://github.com/zyycn/codex-proxy-ui/releases/download/v0.8.0/codex-proxy-ui-0.8.0.tgz':
+    resolution: {integrity: sha512-XpcxFbM5PunedE9+qqb33u2brzFLDnJL1qoewByo1AZZACFXG2TrsxVGsvlpcoJ5INkq5LqDk/w4gAO84s5nAQ==, tarball: https://github.com/zyycn/codex-proxy-ui/releases/download/v0.8.0/codex-proxy-ui-0.8.0.tgz}
+    version: 0.8.0
     engines: {node: '>=24'}
     peerDependencies:
       vite: ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0
@@ -632,8 +632,17 @@ packages:
     resolution: {integrity: sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==}
     engines: {node: '>= 12.0.0'}
 
+  lilconfig@3.1.4:
+    resolution: {integrity: sha512-zJZyBmQhArDRefuWTypZxwDpFDIYmrj8ypSBvwGD5P13Y95s6DjzKgu4DVdGbeQa5PDEsAOCAPNk4X+QOR006w==}
+    engines: {node: '>=14'}
+
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
+
+  marked-alert@2.1.2:
+    resolution: {integrity: sha512-EFNRZ08d8L/iEIPLTlQMDjvwIsj03gxWCczYTht6DCiHJIZhMk4NK5gtPY9UqAYb09eV5VGT+jD4lp396E0I+w==}
+    peerDependencies:
+      marked: '>=7.0.0'
 
   marked@18.1.1:
     resolution: {integrity: sha512-zEGgrtUG8crk+TrMacJSVABU4DYDDkS8uqgU3ohrn/2fW9C2AEfUrO3m6IhpIpQpl7YcVpiXXC9cSMWDANT3dg==}
@@ -657,6 +666,24 @@ packages:
   picomatch@4.0.7:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
     engines: {node: '>=12'}
+
+  postcss-load-config@6.0.1:
+    resolution: {integrity: sha512-oPtTM4oerL+UXmx+93ytZVN82RrlY/wPUV8IeDxFrzIjXOLF1pN+EmKPLbubvKHT2HC20xXsCAH2Z+CKV6Oz/g==}
+    engines: {node: '>= 18'}
+    peerDependencies:
+      jiti: '>=1.21.0'
+      postcss: '>=8.0.9'
+      tsx: ^4.8.1
+      yaml: ^2.4.2
+    peerDependenciesMeta:
+      jiti:
+        optional: true
+      postcss:
+        optional: true
+      tsx:
+        optional: true
+      yaml:
+        optional: true
 
   postcss@8.5.30:
     resolution: {integrity: sha512-zkd+e9S1AQHhmaBKye9zlFHWjOwVgqXl1q3ECYy8561K7qxR2cREf/STLskulBFd78k6AOFeA+ff1TtEzk9bAA==}
@@ -776,7 +803,7 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@codex-proxy/ui@https://github.com/zyycn/codex-proxy-ui/releases/download/v0.7.0/codex-proxy-ui-0.7.0.tgz(vite@8.3.0(@types/node@26.5.1)(jiti@2.7.0))(vue@3.5.42(typescript@6.0.3))':
+  '@codex-proxy/ui@https://github.com/zyycn/codex-proxy-ui/releases/download/v0.8.0/codex-proxy-ui-0.8.0.tgz(jiti@2.7.0)(postcss@8.5.30)(vite@8.3.0(@types/node@26.5.1)(jiti@2.7.0))(vue@3.5.42(typescript@6.0.3))':
     dependencies:
       '@ant-design/colors': 8.0.1
       '@ant-design/fast-color': 3.0.1
@@ -789,6 +816,8 @@ snapshots:
       es-toolkit: 1.52.0
       gsap: 3.15.0
       marked: 18.1.1
+      marked-alert: 2.1.2(marked@18.1.1)
+      postcss-load-config: 6.0.1(jiti@2.7.0)(postcss@8.5.30)
       sortablejs: 1.15.7
       vue: 3.5.42(typescript@6.0.3)
     optionalDependencies:
@@ -801,10 +830,14 @@ snapshots:
       - focus-trap
       - fuse.js
       - idb-keyval
+      - jiti
       - jwt-decode
       - nprogress
+      - postcss
       - qrcode
+      - tsx
       - universal-cookie
+      - yaml
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -1215,9 +1248,15 @@ snapshots:
       lightningcss-win32-arm64-msvc: 1.33.0
       lightningcss-win32-x64-msvc: 1.33.0
 
+  lilconfig@3.1.4: {}
+
   magic-string@0.30.21:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  marked-alert@2.1.2(marked@18.1.1):
+    dependencies:
+      marked: 18.1.1
 
   marked@18.1.1: {}
 
@@ -1230,6 +1269,13 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@4.0.7: {}
+
+  postcss-load-config@6.0.1(jiti@2.7.0)(postcss@8.5.30):
+    dependencies:
+      lilconfig: 3.1.4
+    optionalDependencies:
+      jiti: 2.7.0
+      postcss: 8.5.30
 
   postcss@8.5.30:
     dependencies:

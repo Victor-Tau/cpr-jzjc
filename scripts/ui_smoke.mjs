@@ -3,10 +3,10 @@ import { chromium } from '../.cache/browser/node_modules/playwright/index.mjs'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
-import { resolveTheme, DEFAULT_THEME_COLOR, DEFAULT_CUSTOM_THEME_COLOR } from '../frontend/node_modules/@codex-proxy/ui/dist/theme/index.js'
+import { createTheme, createThemeVars } from '../frontend/node_modules/@codex-proxy/ui/dist/theme/index.js'
 const root=resolve(import.meta.dirname,'..')
 const fixture=JSON.parse(await readFile(resolve(root,'.cache/ui-fixture.json'),'utf8'))
-fixture.themes=Object.fromEntries(['light','dark'].map(name=>[name,resolveTheme(name,DEFAULT_THEME_COLOR,DEFAULT_CUSTOM_THEME_COLOR).tokens]))
+fixture.themes=Object.fromEntries(['light','dark'].map(name=>[name,createThemeVars(createTheme({scheme:name}).tokens)]))
 const browser=await chromium.launch({headless:true,args:['--no-sandbox']})
 try {
   const page=await browser.newPage({viewport:{width:1440,height:1050}})
@@ -199,7 +199,7 @@ try {
   await page.getByRole('listbox').waitFor({state:'hidden'})
   await page.getByText('匹配 11 个',{exact:false}).waitFor()
   await page.getByRole('button',{name:'参数配置',exact:true}).click()
-  assert.equal(await page.getByRole('button',{name:'保存全部参数',exact:true}).count(),1)
+  await page.getByRole('button',{name:'保存全部参数',exact:true}).waitFor()
   // Scheduled subscription filtering is multi-select and keeps both chosen plans.
   await page.getByLabel('定时订阅筛选',{exact:true}).click()
   await page.getByRole('option',{name:'plus',exact:true}).click()
@@ -275,7 +275,11 @@ try {
   await page.setViewportSize({width:430,height:932})
   await page.getByRole('button',{name:'参数配置',exact:true}).click()
   await page.evaluate(()=>{for(const [k,v] of Object.entries(window.__fixture.themes.dark))document.documentElement.style.setProperty(k,v);window.codexProxyPlugin.theme='dark';window.dispatchEvent(new Event('codex-proxy-themechange'))})
-  assert.equal(await page.getByRole('button',{name:'保存全部参数',exact:true}).count(),1)
+  assert.equal(await page.locator('meta[name="codex-proxy-ui-theme-prefix"]').getAttribute('content'),'z')
+  assert.equal(await page.locator('html').getAttribute('data-theme'),'dark')
+  assert.equal(await page.locator('p').first().evaluate(el=>getComputedStyle(el).color),
+    await page.evaluate(()=>{const el=document.createElement('span');el.style.color='var(--z-color-text-secondary)';document.body.append(el);const color=getComputedStyle(el).color;el.remove();return color}))
+  await page.getByRole('button',{name:'保存全部参数',exact:true}).waitFor()
   await page.screenshot({path:resolve(root,'.cache/mobile.png'),fullPage:true})
   await page.getByRole('button',{name:'账户检测',exact:true}).click()
   await assertSelectionVisible()
@@ -342,7 +346,7 @@ try {
     f.bootstrap.jobs.unshift({...j,id:'auto-ui',source:'schedule',status:'completed',createdAt:Date.now()})
     f.revision++;document.dispatchEvent(new Event('visibilitychange'))
   })
-  await page.locator('.detection-source').filter({hasText:'（自动）'}).waitFor({timeout:2500})
+  await page.locator('.detection-source').filter({hasText:'（定时）'}).waitFor({timeout:2500})
   await page.screenshot({path:resolve(root,'.cache/detection-source.png'),fullPage:true})
   assert.equal(await page.getByRole('button',{name:'检测',exact:true}).isDisabled(),true)
   await page.getByRole('button',{name:'停止手动队列',exact:true}).click()
@@ -362,7 +366,7 @@ try {
   await page.getByRole('button',{name:'停止自动队列',exact:true}).click()
   assert.deepEqual(await page.evaluate(()=>JSON.parse(window.__calls.filter(c=>c.path==='api/cancel').at(-1).body)),{source:'schedule'})
   await page.getByRole('button',{name:'检测历史',exact:true}).click()
-  await page.locator('.detection-source').filter({hasText:'（自动）'}).waitFor()
+  await page.locator('.detection-source').filter({hasText:'（定时）'}).waitFor()
   await page.locator('.detection-source').filter({hasText:'（手动）'}).waitFor()
   await page.screenshot({path:resolve(root,'.cache/history.png'),fullPage:true})
   await page.getByRole('button',{name:'账户检测',exact:true}).click()

@@ -25,7 +25,7 @@
 | Python | >=3.11，开发依赖见 `requirements-dev.txt` |
 | Zig / cargo-zigbuild | 构建 glibc 2.36 目标的发布二进制；当前发行使用 Zig 0.13.0 |
 | crane | 拉取构建脚本固定的 Python 运行时基础镜像；已有基础归档时可复用 |
-| cpr-plugin | 使用与宿主同版源码构建的官方打包工具，当前对应 CPR v3.36.0 |
+| cpr-plugin | 使用与宿主同版源码构建的官方打包工具，当前对应 CPR v3.37.2 |
 
 ```bash
 git clone https://github.com/Victor-Tau/cpr-jzjc.git
@@ -68,13 +68,13 @@ export OMP_NUM_THREADS=1
 task_cpu=0
 ```
 
-从 CPR 官方对应标签构建打包工具，沿用其 workspace 锁文件。当前 SDK 固定提交为 `5ae38dc0c55c192815ef605dde6c05fd767a2c28`：
+从 CPR 官方对应标签构建打包工具，沿用其 workspace 锁文件。当前 SDK 固定提交为 `641f43b3030b1c68961e05d525e58ec6f4264a15`：
 
 ```bash
-git clone --depth 1 --branch v3.36.0 \
-  https://github.com/zyycn/codex-proxy-rs.git .cache/codex-proxy-rs-v3.36.0
+git clone --depth 1 --branch v3.37.2 \
+  https://github.com/zyycn/codex-proxy-rs.git .cache/codex-proxy-rs-v3.37.2
 taskset -c "$task_cpu" cargo install \
-  --path .cache/codex-proxy-rs-v3.36.0/backend/apps/plugin-cli --locked
+  --path .cache/codex-proxy-rs-v3.37.2/backend/apps/plugin-cli --locked
 ```
 
 安装所需工具并激活虚拟环境后，可使用完整打包脚本：
@@ -97,7 +97,7 @@ cpr-plugin package --manifest plugin.json \
   --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health \
   --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
 python scripts/verify_artifact.py \
-  dist/personal.modeltrace-health-1.11.1-x86_64-unknown-linux-gnu.tar.gz
+  dist/personal.modeltrace-health-1.12.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 运行时脚本验证固定基础镜像配置、镜像层和 NumPy wheel 摘要，不依赖 Docker 守护进程。已有由 crane 拉取的基础归档时，可传入 `--base-tar /path/to/python-base.tar`。

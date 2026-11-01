@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/Victor-Tau/cpr-jzjc)](https://github.com/Victor-Tau/cpr-jzjc/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CPR: 3.36.x](https://img.shields.io/badge/CPR-3.36.x-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs)
+[![CPR: 3.37.2](https://img.shields.io/badge/CPR-3.37.2-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs)
 
 在 **Codex Proxy RS（CPR）** 管理页面中，批量检测账户的模型输出、查看指纹匹配结果，并按自定义规则执行复测、定时检查和账户处理。
 
@@ -42,8 +42,8 @@
 
 | 项目 | 当前发布版本要求 |
 | --- | --- |
-| 插件版本 | **1.11.1** |
-| CPR 宿主 | **>=3.36.0、<3.37.0** |
+| 插件版本 | **1.12.0** |
+| CPR 宿主 | **>=3.37.2、<3.38.0** |
 | 平台 | **Linux x86_64，glibc 2.36+** |
 | 运行模式 | `trustedProcess` |
 | 评分运行时 | 已包含私有 Python/NumPy，无需另装系统 Python 或部署 ModelTrace 服务 |
@@ -52,7 +52,7 @@
 
 ### 首次安装
 
-1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载 `personal.modeltrace-health-1.11.1-x86_64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
+1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载 `personal.modeltrace-health-1.12.0-x86_64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
 2. 在 CPR 中打开「插件管理 → 安装插件 → 上传包」，上传下载的安装包并启用。
 3. 打开「账号降智检测 → 参数配置」，选择已有计量 Key，确认请求模型及判定规则，点击「保存全部参数」。
 4. 回到「账户检测」，先选择一个账户执行检测，在报告中查看结果，再按需启用批量检测或定时检查。
@@ -67,7 +67,7 @@
 
 在宿主插件管理中上传新版本包，更新并切换**现有插件实例**。同实例升级保留配置、计划、检测历史和指纹库；升级前也可在「参数配置 → 配置备份」导出配置。
 
-[1.11.1](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.11.1) 修复 GitHub Release 摘要缓存导致的安装校验问题。详细变更见 [CHANGELOG](CHANGELOG.md)。
+[1.12.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.12.0) 适配 CPR 3.37.2，并同步新版 UI 组件库和主题变量。详细变更见 [CHANGELOG](CHANGELOG.md)。
 
 ## 如何理解结果
 
