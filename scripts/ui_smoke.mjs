@@ -5,6 +5,8 @@ import { readFile } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
 import { createTheme, createThemeVars } from '../frontend/node_modules/@codex-proxy/ui/dist/theme/index.js'
 const root=resolve(import.meta.dirname,'..')
+// UI_DIST / UI_SHOTS let parallel builds run side by side without sharing frontend/dist.
+const dist=resolve(root,process.env.UI_DIST||'frontend/dist'),shots=resolve(root,process.env.UI_SHOTS||'.cache')
 const fixture=JSON.parse(await readFile(resolve(root,'.cache/ui-fixture.json'),'utf8'))
 fixture.themes=Object.fromEntries(['light','dark'].map(name=>[name,createThemeVars(createTheme({scheme:name}).tokens)]))
 const browser=await chromium.launch({headless:true,args:['--no-sandbox']})
@@ -26,8 +28,8 @@ try {
         const offset=Number(new URLSearchParams(input.query).get('pageOffset')||0),end=Math.min(offset+13,f.accounts.length)
         result={accounts:f.accounts.slice(offset,end),nextOffset:null,pagination:{field:'accounts',snapshot:'ui-accounts',nextOffset:end<f.accounts.length?end:null}}
       }
-      else if(input.path==='api/progress'){const revision='ui:'+f.revision,changed=new URLSearchParams(input.query).get('since')!==revision;result={revision,changed,jobs:changed?b.jobs:null,nextDue:b.nextDue,scheduleError:null}}
-      else if(input.path==='api/jobs')result={jobs:b.jobs,banks:b.banks,nextDue:b.nextDue,scheduleError:null}
+      else if(input.path==='api/progress'){const revision='ui:'+f.revision,changed=new URLSearchParams(input.query).get('since')!==revision;result={revision,changed,jobs:changed?b.jobs:null,nextDue:b.nextDue,scheduleError:null,errorTrigger:b.errorTrigger}}
+      else if(input.path==='api/jobs')result={jobs:b.jobs,banks:b.banks,nextDue:b.nextDue,scheduleError:null,errorTrigger:b.errorTrigger}
       else if(input.path==='api/report')result=f.report
       else if(input.path==='api/models')result={models:['gpt-6.1-sol','gpt-5.6-luna']}
       else if(input.path==='api/config'){const data=JSON.parse(input.body);b.config=data.config;b.configRevision++;result={config:data.config,revision:b.configRevision}}
@@ -45,7 +47,7 @@ try {
     if(new URL(route.request().url()).pathname==='/host.html') {
       await route.fulfill({contentType:'text/html',body:'<iframe src="/" sandbox="allow-scripts" style="width:100%;height:100vh;border:0"></iframe>'});return
     }
-    try {const url=new URL(route.request().url()); const file=resolve(root,'frontend/dist',url.pathname==='/'?'index.html':'.'+url.pathname);assert(file.startsWith(resolve(root,'frontend/dist')+'/'));const body=await readFile(file);await route.fulfill({body,contentType:({'.html':'text/html','.js':'text/javascript','.css':'text/css'})[extname(file)] || 'application/octet-stream'})}catch{await route.fulfill({status:404,body:''})}
+    try {const url=new URL(route.request().url()); const file=resolve(dist,url.pathname==='/'?'index.html':'.'+url.pathname);assert(file.startsWith(dist+'/'));const body=await readFile(file);await route.fulfill({body,contentType:({'.html':'text/html','.js':'text/javascript','.css':'text/css'})[extname(file)] || 'application/octet-stream'})}catch{await route.fulfill({status:404,body:''})}
   })
   await page.goto('http://plugin.test/')
   await page.getByRole('textbox',{name:'搜索账户',exact:true}).waitFor()
@@ -53,6 +55,29 @@ try {
   assert.equal(await page.getByText('未命中降智规则',{exact:true}).count(),0)
   assert.match(await page.getByLabel('每页条数',{exact:true}).innerText(),/100 条\/页/)
   assert.equal(await page.locator('tbody .identity b').count(),fixture.accounts.length)
+  // A finished verdict is a single pill; a message that only repeats it is hidden.
+  const testedRow=page.locator('tbody tr').filter({hasText:'user@example.com'})
+  assert.equal(await testedRow.getByText('未降智',{exact:true}).count(),1)
+  assert.equal(await testedRow.locator('.live-progress').count(),0)
+  assert.match(await testedRow.locator('.cand-inline').innerText(),/gpt-5\.6-terra\s+98\.9%/)
+  assert.match(await testedRow.locator('.cell-time').getAttribute('title'),/\d{4}\/\d{1,2}\/\d{1,2} \d{2}:\d{2}:\d{2}/)
+  assert.equal(await testedRow.locator('.detection-source').innerText(),'手动')
+  // Request-log trigger status follows bootstrap and every progress poll.
+  assert.match((await page.locator('.trigger-tile').innerText()).replace(/\s+/g,' '),/日志触发 未开启/)
+  await page.evaluate(()=>{
+    const f=window.__fixture
+    f.bootstrap.errorTrigger={enabled:true,codes:[503,429],since:Date.now()-60000,checkedAt:Date.now()-20000,error:null,matchedAt:Date.now()-180000,matchedAccount:'user@example.com',matchedCode:503,matchedTotal:2}
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.locator('.trigger-tile').filter({hasText:'累计触发 2 次'}).waitFor({timeout:2500})
+  const triggerText=(await page.locator('.trigger-tile').innerText()).replace(/\s+/g,' ')
+  assert.match(triggerText,/监听中/);assert.match(triggerText,/503 429/);assert.match(triggerText,/最近检查 刚刚/)
+  assert.match(triggerText,/最近命中 user@example\.com · 503 · 3 分钟前/)
+  await page.evaluate(()=>{window.__fixture.bootstrap.errorTrigger.error='读取请求错误日志失败：模拟错误';document.dispatchEvent(new Event('visibilitychange'))})
+  await page.locator('.trigger-tile .text-warning').filter({hasText:'读取请求错误日志失败：模拟错误'}).waitFor({timeout:2500})
+  assert.match(await page.locator('.trigger-tile').getAttribute('class'),/\btone-warning\b/)
+  await page.evaluate(()=>{window.__fixture.bootstrap.errorTrigger.error=null;document.dispatchEvent(new Event('visibilitychange'))})
+  await page.locator('.trigger-tile .text-warning').waitFor({state:'detached',timeout:2500})
   assert(await page.evaluate(()=>window.__calls.some(c=>c.path==='api/accounts' && new URLSearchParams(c.query).has('pageSnapshot'))))
   await page.getByLabel('每页条数',{exact:true}).click()
   await page.getByRole('option',{name:'20 条/页',exact:true}).click()
@@ -119,7 +144,7 @@ try {
   await accountMatches(2)
   await chooseResult('降智')
   await accountMatches(1)
-  await page.screenshot({path:resolve(root,'.cache/result-filter-accounts.png'),fullPage:true})
+  await page.screenshot({path:resolve(shots,'result-filter-accounts.png'),fullPage:true})
   await page.evaluate(()=>{
     const f=window.__fixture
     f.bootstrap.jobs[0].verdict='no_match'
@@ -151,7 +176,7 @@ try {
   await page.getByRole('button',{name:'删除所选（1）',exact:true}).waitFor()
   await page.getByRole('button',{name:'清空选择',exact:true}).click()
   await page.getByRole('textbox',{name:'搜索历史账户',exact:true}).fill('')
-  await page.screenshot({path:resolve(root,'.cache/result-filter-history.png'),fullPage:true})
+  await page.screenshot({path:resolve(shots,'result-filter-history.png'),fullPage:true})
   await page.getByRole('button',{name:'清除结论筛选',exact:true}).click()
   await page.evaluate(()=>{
     const f=window.__fixture
@@ -180,7 +205,7 @@ try {
     assert(rows.length>0 && rows.every(Boolean),'account selection checkbox is clipped or covered')
   }
   await assertSelectionVisible()
-  for(const [label, tone] of [['正常','success'],['异常','danger'],['额度耗尽','warning'],['限流','warning'],['已停用','muted']]) {
+  for(const [label, tone] of [['正常','tone-success'],['异常','tone-danger'],['额度耗尽','tone-warning'],['限流','tone-warning'],['已停用','tone-neutral']]) {
     const badge=page.locator('.account-status').filter({hasText:label}).first()
     assert.match(await badge.getAttribute('class'),new RegExp(`\\b${tone}\\b`))
   }
@@ -188,11 +213,13 @@ try {
   await page.getByText('匹配 1 个',{exact:false}).waitFor()
   await page.getByLabel('选择 user@example.com',{exact:true}).locator('..').click()
   await page.getByRole('button',{name:'检测所选（1）'}).click()
+  await page.getByRole('dialog',{name:'开始账户检测',exact:true}).getByText('user@example.com',{exact:true}).waitFor()
+  await page.screenshot({path:resolve(shots,'confirm.png'),animations:'disabled'})
   await page.getByRole('button',{name:'加入检测队列',exact:true}).click()
   await page.getByText('检测已加入后台队列，离开页面后仍会继续。').waitFor()
   assert.equal(await page.evaluate(()=>window.__randomUuidFallback),true)
   await page.getByRole('textbox',{name:'搜索账户',exact:true}).fill('')
-  await page.screenshot({path:resolve(root,'.cache/accounts.png'),fullPage:true})
+  await page.screenshot({path:resolve(shots,'accounts.png'),fullPage:true})
   // Exercise a real dropdown, not only the text search.
   await page.getByLabel('订阅类型筛选',{exact:true}).click()
   await page.getByRole('option',{name:'pro',exact:true}).click()
@@ -264,14 +291,29 @@ try {
   await page.getByRole('button',{name:'下载并应用',exact:true}).click()
   assert.equal(await page.evaluate(()=>window.__fixture.bootstrap.banks.active.commit),'b'.repeat(40))
   await page.getByRole('button',{name:'回退上一版本',exact:true}).click()
-  await page.screenshot({path:resolve(root,'.cache/settings.png'),fullPage:true})
+  await page.screenshot({path:resolve(shots,'settings.png'),fullPage:true})
   await page.getByRole('button',{name:'检测历史',exact:true}).click()
+  await page.evaluate(()=>{const r=window.__fixture.report;r.source='error_code';r.trigger={code:503,requestId:'req-trigger-503',message:'upstream connect error or disconnect/reset before headers',observedAt:Date.now()-120000}})
   await page.getByRole('button',{name:'报告',exact:true}).first().click()
   await page.getByText('配置快照与版本',{exact:true}).waitFor()
-  await page.getByRole('dialog',{name:'检测报告',exact:true}).waitFor()
+  const reportDialog=page.getByRole('dialog',{name:'检测报告',exact:true})
+  await reportDialog.waitFor()
   await assertNoUsage()
-  await page.screenshot({path:resolve(root,'.cache/report.png'),fullPage:true,animations:'disabled'})
+  const triggerBlock=reportDialog.getByRole('region',{name:'触发来源',exact:true})
+  assert.match((await triggerBlock.innerText()).replace(/\s+/g,' '),/触发来源 HTTP 503 2 分钟前观察到 请求 ID req-trigger-503 错误信息 upstream connect error/)
+  assert.equal(await reportDialog.locator('.rpt-who .src-pill').innerText(),'日志触发 503')
+  assert.equal(await reportDialog.locator('.rpt-verdict .pill').innerText(),'未降智')
+  assert.equal(await reportDialog.locator('.rpt-status').count(),0)
+  assert.match((await reportDialog.locator('.rpt-verdict').innerText()).replace(/\s+/g,' '),/最高候选 gpt-5\.6-terra 概率 98\.9%/)
+  assert.match(await reportDialog.locator('.prob-row.degraded').innerText(),/gpt-5\.6-luna/)
+  const modelCount=await page.evaluate(()=>window.__fixture.report.rounds[0].score.results.length)
+  assert.equal(await reportDialog.locator('.prob-row').count(),9)
+  await reportDialog.getByRole('button',{name:`显示全部 ${modelCount} 个模型`,exact:true}).click()
+  assert.equal(await reportDialog.locator('.prob-row').count(),modelCount)
+  await reportDialog.getByRole('button',{name:'收起',exact:true}).click()
+  await page.screenshot({path:resolve(shots,'report.png'),fullPage:true,animations:'disabled'})
   await page.keyboard.press('Escape')
+  await page.evaluate(()=>{const r=window.__fixture.report;r.source='manual';delete r.trigger})
   await page.setViewportSize({width:430,height:932})
   await page.getByRole('button',{name:'参数配置',exact:true}).click()
   await page.evaluate(()=>{for(const [k,v] of Object.entries(window.__fixture.themes.dark))document.documentElement.style.setProperty(k,v);window.codexProxyPlugin.theme='dark';window.dispatchEvent(new Event('codex-proxy-themechange'))})
@@ -280,14 +322,22 @@ try {
   assert.equal(await page.locator('p').first().evaluate(el=>getComputedStyle(el).color),
     await page.evaluate(()=>{const el=document.createElement('span');el.style.color='var(--z-color-text-secondary)';document.body.append(el);const color=getComputedStyle(el).color;el.remove();return color}))
   await page.getByRole('button',{name:'保存全部参数',exact:true}).waitFor()
-  await page.screenshot({path:resolve(root,'.cache/mobile.png'),fullPage:true})
+  await page.screenshot({path:resolve(shots,'mobile.png'),fullPage:true})
   await page.getByRole('button',{name:'账户检测',exact:true}).click()
   await assertSelectionVisible()
+  await page.screenshot({path:resolve(shots,'mobile-accounts.png'),fullPage:true})
+  await page.getByRole('button',{name:'检测历史',exact:true}).click()
+  await page.getByRole('button',{name:'报告',exact:true}).first().click()
+  await page.getByRole('dialog',{name:'检测报告',exact:true}).waitFor()
+  await page.screenshot({path:resolve(shots,'mobile-report.png'),animations:'disabled'})
+  await page.keyboard.press('Escape')
+  await page.getByRole('dialog',{name:'检测报告',exact:true}).waitFor({state:'hidden'})
+  await page.getByRole('button',{name:'账户检测',exact:true}).click()
   // A live task must update the list and an already open report without clicks.
   await page.setViewportSize({width:1440,height:1050})
   const nextRunText = async () => (await page.locator('.next-run').innerText()).replace(/\s+/g,' ')
-  await page.locator('.auto-pill').waitFor()
-  assert.match(await page.locator('.auto-pill').innerText(),/自动检测 · 每 30 分钟/)
+  await page.locator('.schedule-tile').waitFor()
+  assert.match((await page.locator('.schedule-tile').innerText()).replace(/\s+/g,' '),/定时检测 已开启 每 30 分钟/)
   assert.match(await nextRunText(),/下次检测 .+/)
   assert.doesNotMatch(await nextRunText(),/（自动）|（手动）/)
   assert.match(await page.locator('.next-run').getAttribute('title'),/下次自动检测/)
@@ -312,7 +362,8 @@ try {
   await page.getByRole('button',{name:'保存全部参数',exact:true}).click()
   await page.waitForFunction(()=>window.__fixture.bootstrap.config.schedule.enabled===false)
   await page.getByRole('button',{name:'账户检测',exact:true}).click()
-  await page.getByText('自动检测 · 已关闭',{exact:true}).waitFor()
+  await page.locator('.schedule-tile').filter({hasText:'已关闭'}).waitFor()
+  assert.doesNotMatch(await page.locator('.schedule-tile').innerText(),/已开启/)
   assert.match(await nextRunText(),/下次检测 —/)
   await page.getByLabel('订阅类型筛选',{exact:true}).click()
   await page.getByRole('option',{name:'全部订阅',exact:true}).click()
@@ -339,15 +390,15 @@ try {
   })
   await page.locator('.live-progress').filter({hasText:'正在接收回答'}).waitFor({timeout:2500})
   assert.match(await nextRunText(),/下次检测 —/)
-  assert.match(await page.locator('.detection-source').innerText(),/（手动）/)
+  assert.equal(await page.locator('.detection-source').innerText(),'手动')
   // A newer automatic result must not hide an active manual task from deduplication.
   await page.evaluate(()=>{
     const f=window.__fixture,j=f.bootstrap.jobs[0]
     f.bootstrap.jobs.unshift({...j,id:'auto-ui',source:'schedule',status:'completed',createdAt:Date.now()})
     f.revision++;document.dispatchEvent(new Event('visibilitychange'))
   })
-  await page.locator('.detection-source').filter({hasText:'（定时）'}).waitFor({timeout:2500})
-  await page.screenshot({path:resolve(root,'.cache/detection-source.png'),fullPage:true})
+  await page.locator('.detection-source').filter({hasText:/^定时$/}).waitFor({timeout:2500})
+  await page.screenshot({path:resolve(shots,'detection-source.png'),fullPage:true})
   assert.equal(await page.getByRole('button',{name:'检测',exact:true}).isDisabled(),true)
   await page.getByRole('button',{name:'停止手动队列',exact:true}).click()
   assert.deepEqual(await page.evaluate(()=>JSON.parse(window.__calls.filter(c=>c.path==='api/cancel').at(-1).body)),{source:'manual'})
@@ -365,19 +416,32 @@ try {
   await page.getByText('检测已加入后台队列，离开页面后仍会继续。').waitFor()
   await page.getByRole('button',{name:'停止自动队列',exact:true}).click()
   assert.deepEqual(await page.evaluate(()=>JSON.parse(window.__calls.filter(c=>c.path==='api/cancel').at(-1).body)),{source:'schedule'})
+  assert.equal(await page.getByRole('button',{name:'停止日志触发队列',exact:true}).count(),0)
+  await page.evaluate(()=>{
+    const f=window.__fixture,j={...f.bootstrap.jobs.find(j=>j.source==='manual')}
+    delete j.progress
+    f.bootstrap.jobs.unshift({...j,id:'trigger-ui',source:'error_code',triggerCode:503,status:'queued',verdict:'',prediction:null,probability:null,message:'请求日志出现 503，已自动排队检测',createdAt:Date.now(),finishedAt:null})
+    f.revision++;document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.locator('.detection-source').filter({hasText:/^日志触发 503$/}).waitFor({timeout:2500})
+  await page.locator('.live-progress').filter({hasText:'请求日志出现 503，已自动排队检测'}).waitFor()
+  assert.match((await page.locator('.queue-bar').innerText()).replace(/\s+/g,' '),/日志触发 1/)
+  await page.getByRole('button',{name:'停止日志触发队列',exact:true}).click()
+  assert.deepEqual(await page.evaluate(()=>JSON.parse(window.__calls.filter(c=>c.path==='api/cancel').at(-1).body)),{source:'error_code'})
   await page.getByRole('button',{name:'检测历史',exact:true}).click()
-  await page.locator('.detection-source').filter({hasText:'（定时）'}).waitFor()
-  await page.locator('.detection-source').filter({hasText:'（手动）'}).waitFor()
-  await page.screenshot({path:resolve(root,'.cache/history.png'),fullPage:true})
+  await page.locator('.detection-source').filter({hasText:/^日志触发 503$/}).waitFor()
+  await page.locator('.detection-source').filter({hasText:/^定时$/}).waitFor()
+  await page.locator('.detection-source').filter({hasText:/^手动$/}).waitFor()
+  await page.screenshot({path:resolve(shots,'history.png'),fullPage:true})
   await page.getByRole('button',{name:'账户检测',exact:true}).click()
   // Restore the original live fixture for the report and retry regression checks.
   await page.evaluate(()=>{
     const f=window.__fixture
-    f.bootstrap.jobs=f.bootstrap.jobs.filter(j=>j.id!=='auto-ui')
+    f.bootstrap.jobs=f.bootstrap.jobs.filter(j=>!['auto-ui','trigger-ui'].includes(j.id))
     f.bootstrap.jobs[0].status='running'
     f.revision++;document.dispatchEvent(new Event('visibilitychange'))
   })
-  await page.locator('.detection-source').filter({hasText:'（手动）'}).waitFor({timeout:2500})
+  await page.locator('.detection-source').filter({hasText:/^手动$/}).waitFor({timeout:2500})
   await page.getByRole('button',{name:'报告',exact:true}).click()
   await page.getByText('配置快照与版本',{exact:true}).waitFor()
   const reportsBeforeRetry=await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/report').length)
@@ -425,6 +489,7 @@ try {
     f.report.message=j.message='已确认降智；已关闭账户调度；移组失败';f.revision++
   })
   await page.getByRole('button',{name:'重试移入分组',exact:true}).waitFor({timeout:2500})
+  await page.screenshot({path:resolve(shots,'report-actions.png'),animations:'disabled'})
   const probes=await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/submit').length)
   await page.getByRole('button',{name:'重试移入分组',exact:true}).click()
   await page.getByRole('status').filter({hasText:'已移入指定分组'}).last().waitFor()
@@ -446,9 +511,10 @@ try {
   await page.getByText('已选 0 条 · 匹配 4 条',{exact:false}).waitFor()
   assert.equal(await page.locator('tbody input[type=checkbox]:disabled').count(),1)
   await page.getByLabel('全选筛选结果（3）',{exact:true}).locator('..').click()
-  await page.screenshot({path:resolve(root,'.cache/history.png'),fullPage:true})
+  await page.screenshot({path:resolve(shots,'history.png'),fullPage:true})
   await page.getByRole('button',{name:'删除所选（3）',exact:true}).click()
   await page.getByRole('dialog',{name:'删除检测历史',exact:true}).waitFor()
+  await page.screenshot({path:resolve(shots,'delete.png'),animations:'disabled'})
   await page.getByRole('button',{name:'删除 3 条',exact:true}).click()
   await page.getByText('已删除 3 条检测记录。',{exact:true}).waitFor()
   assert.equal(await page.evaluate(()=>window.__fixture.bootstrap.jobs.length),1)
@@ -476,5 +542,5 @@ try {
   await assertNoUsage()
   assert.deepEqual(errors,[])
   for(const path of ['api/submit','api/models','api/config','api/banks/check','api/banks/apply','api/banks/rollback','api/report','api/config/preview','api/retry-group'])assert(paths.includes(path),path)
-  console.log(JSON.stringify({ui:'passed',checks:['three result categories in accounts and history','latest result and unfinished stale verdict classification','combined result/search/subscription/status/group filters','result filtering resets pagination and preserves selection','queue shortcuts, clear filters and live category updates','history category search and selection','usage display and polling removed','unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','history select all and batch delete','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','scheduled subscription multi-select','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','stale receiving progress expires','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
+  console.log(JSON.stringify({ui:'passed',checks:['three result categories in accounts and history','latest result and unfinished stale verdict classification','combined result/search/subscription/status/group filters','result filtering resets pagination and preserves selection','queue shortcuts, clear filters and live category updates','history category search and selection','usage display and polling removed','unclipped checkboxes on desktop and mobile','colored account statuses','automatic next run independent from manual tasks','manual work preserves enabled automatic schedule','source labels after detection time in accounts and history','manual submit during automatic detection','source-scoped queue cancellation','log-triggered queue cancellation and source label','request-log trigger status tile','verdict shown once with compact time','report trigger source, degraded highlight and model expander','history select all and batch delete','active manual task remains locked behind newer automatic result','single save button','search','subscription filter','batch submit','scheduled subscription multi-select','configuration save','v1.4 defaults and independent action options','JSON backup and import preview','backup and import inside RS sandbox','group action refresh and retry without probing','model catalog','bank update and rollback','report','mobile and dark mode','live progress within 2.5 seconds','stale receiving progress expires','retry reason and diagnostics refresh without clicks','automatic report completion','pause and resume on visibility change'],pageErrors:errors},null,2))
 } finally {await browser.close()}

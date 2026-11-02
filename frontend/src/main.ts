@@ -4,6 +4,7 @@ import { zhHans } from '@codex-proxy/ui/locale'
 import App from './App.vue'
 import '@codex-proxy/ui/styles.css'
 import './utilities.css'
+import './base.css'
 import './style.css'
 const theme = () => { document.documentElement.dataset.theme = window.codexProxyPlugin?.theme || 'light' }
 theme()

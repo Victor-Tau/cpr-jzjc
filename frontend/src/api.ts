@@ -1,4 +1,4 @@
-import type { Account, Banks, Config, Group, Job, Report } from './types'
+import type { Account, Banks, Config, ErrorTrigger, Group, Job, Report } from './types'
 
 export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const host = window.codexProxyPlugin
@@ -41,7 +41,7 @@ export async function request<T>(method: string, path: string, body?: unknown): 
   }
   throw new Error('数据正在更新，请稍后重试')
 }
-export interface Bootstrap { config: Config; configRevision: number; groups: Group[]; keys: { id: string; name: string }[]; jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null }
+export interface Bootstrap { config: Config; configRevision: number; groups: Group[]; keys: { id: string; name: string }[]; jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null; errorTrigger?: ErrorTrigger }
 export const api = {
   bootstrap: () => request<Bootstrap>('GET', 'api/bootstrap'),
   accounts: async () => {
@@ -55,13 +55,13 @@ export const api = {
     return { accounts }
   },
   models: (key: string) => request<{ models: string[] }>('GET', `api/models?keyId=${encodeURIComponent(key)}`),
-  progress: (since?: string) => request<{ revision: string; changed: boolean; jobs: Job[] | null; nextDue: number | null; scheduleError: string | null }>('GET', `api/progress${since === undefined ? '' : `?since=${encodeURIComponent(since)}`}`),
-  jobs: () => request<{ jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null }>('GET', 'api/jobs'),
+  progress: (since?: string) => request<{ revision: string; changed: boolean; jobs: Job[] | null; nextDue: number | null; scheduleError: string | null; errorTrigger?: ErrorTrigger }>('GET', `api/progress${since === undefined ? '' : `?since=${encodeURIComponent(since)}`}`),
+  jobs: () => request<{ jobs: Job[]; banks: Banks; nextDue: number | null; scheduleError: string | null; errorTrigger?: ErrorTrigger }>('GET', 'api/jobs'),
   report: (id: string) => request<Report>('GET', `api/report?id=${encodeURIComponent(id)}`),
   save: (config: Config, revision: number) => request<{ revision: number; config: Config }>('POST', 'api/config', { config, revision }),
   previewConfig: (config: unknown) => request<{ config: Config }>('POST', 'api/config/preview', { config }),
   submit: (accountIds: string[], requestId: string) => request('POST', 'api/submit', { accountIds, requestId }),
-  cancel: (id?: string, source?: 'manual' | 'schedule') => request('POST', 'api/cancel', { id, source }),
+  cancel: (id?: string, source?: 'manual' | 'schedule' | 'error_code') => request('POST', 'api/cancel', { id, source }),
   delete: (id: string) => request('POST', 'api/delete', { id }),
   deleteMany: (ids: string[]) => request<{ deleted: number; skipped: number }>('POST', 'api/delete', { ids }),
   retryDisable: (id: string) => request('POST', 'api/retry-disable', { id }),

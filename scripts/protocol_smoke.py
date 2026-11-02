@@ -41,7 +41,7 @@ class Host:
         self.identity="original";self.bank=(ROOT/"vendor/modeltrace/data/unified_bank.json").read_bytes();self.sha="b"*40
         self.disable_calls=0;self.fail_disable=False;self.sequence=1
         self.fail_put=None;self.model_read_delay=0;self.model_response_delay=0;self.callback_response_delay=0
-        self.additional_accounts=[]
+        self.additional_accounts=[];self.error_logs=[];self.error_log_queries=[];self.fail_error_log=False
         self.groups=[{'id':'group-test','name':'测试组'},{'id':'group-degraded','name':'降智隔离组'}]
         self.memberships=['group-test'];self.move_calls=0;self.fail_move=False;self.ignore_move=False;self.updates=[]
         env=os.environ.copy();env['MODELTRACE_DEV_PYTHON']=str(ROOT/'.venv/bin/python')
@@ -175,6 +175,13 @@ class Host:
                 # current plugin must never query platform usage records.
                 assert self.protocol_version == 4, 'removed usage lookup was called'
                 raise SimulatedFault('usage records unavailable')
+            elif uri.startswith('/api/admin/operations/errors?'):
+                from urllib.parse import urlparse, parse_qs
+                q=parse_qs(urlparse(uri).query);self.error_log_queries.append(q)
+                if self.fail_error_log:raise SimulatedFault('error log unavailable')
+                assert int(q['pageSize'][0])<=100 and 'startTime' in q, q
+                page=int(q['currentPage'][0]);size=int(q['pageSize'][0])
+                data={'items':self.error_logs[(page-1)*size:page*size],'currentPage':page,'pageSize':size,'total':len(self.error_logs)}
             elif '/accounts/batch-update' in uri:
                 update=json.loads(body);assert update['accountIds']==['acct-test'];self.updates.append(update)
                 if 'enabled' in update:
@@ -938,6 +945,64 @@ class Integration(unittest.TestCase):
         jobs=self.host.request('api/jobs')['jobs']
         self.assertEqual({j['accountId'] for j in jobs},{'acct-test','acct-pro'})
         self.assertTrue(all(j['source']=='schedule' for j in jobs))
+    def error_log(self,id,account='acct-test',source='model_request',**fields):
+        entry={'id':id,'requestId':id,'kind':'model_request','accountId':account,'accountName':'test-account','accountEmail':'user@example.com',
+               'clientStatusCode':None,'upstreamStatusCode':None,'providerErrorCode':'server_is_overloaded','requestKind':None,'subagentKind':None,
+               'message':'OpenAI upstream failure: kind=upstream_capacity_unavailable, status=503','metadata':{'source':source}}
+        entry.update(fields);self.host.error_logs.append(entry);return entry
+    def test_request_error_log_triggers_immediate_check(self):
+        # The reported case: the status exists only in the diagnostic message.
+        self.config(triggerErrorCodes=[503])
+        self.error_log('ops-1',source='ops_event',accountId=None)
+        self.error_log('ops-1-account',source='ops_event')
+        self.host.tick()
+        jobs=[j for j in self.host.request('api/jobs')['jobs'] if j['source']=='error_code']
+        self.assertEqual(len(jobs),1);self.assertEqual(jobs[0]['accountId'],'acct-test');self.assertEqual(jobs[0]['triggerCode'],503)
+        report=self.host.request('api/report?id='+jobs[0]['id'])
+        self.assertEqual(report['trigger']['code'],503);self.assertIn('upstream_capacity_unavailable',report['trigger']['message'])
+        status=self.host.request('api/bootstrap')['errorTrigger']
+        self.assertTrue(status['enabled']);self.assertEqual(status['matchedCode'],503);self.assertEqual(status['matchedTotal'],1);self.assertIsNone(status['error'])
+        self.assertTrue(all('startTime' in q for q in self.host.error_log_queries))
+        # Seen entries, cooldown, own probe failures and other codes never re-trigger.
+        self.host.tick(2)
+        self.error_log('later-503',upstreamStatusCode=503)
+        self.error_log('own-probe',upstreamStatusCode=503,requestKind='plugin_bound_model',subagentKind='test')
+        self.error_log('rate-limit',upstreamStatusCode=429,message='rate limited')
+        self.host.tick(2)
+        self.assertEqual(len([j for j in self.host.request('api/jobs')['jobs'] if j['source']=='error_code']),1)
+    def test_request_error_log_cooldown_and_failures(self):
+        self.config(triggerErrorCodes=[503,429],triggerCooldownMinutes=0,lowConfidencePercent=0,degradedPercent=100)
+        self.error_log('first',upstreamStatusCode=429,message='rate limited',accountId=None,accountName=None)
+        self.host.tick(3)
+        jobs=[j for j in self.host.request('api/jobs')['jobs'] if j['source']=='error_code']
+        self.assertEqual([j['triggerCode'] for j in jobs],[429])  # matched by email
+        self.assertNotIn(jobs[0]['status'],['queued','running'])
+        own=self.host.request('api/report?id='+jobs[0]['id'])['attempts'][0]['requestId']
+        self.error_log(own,upstreamStatusCode=503)  # a failed probe of this plugin by request ID
+        self.error_log('second')
+        self.host.tick()
+        self.assertEqual(len([j for j in self.host.request('api/jobs')['jobs'] if j['source']=='error_code']),2)
+        # Log-triggered work can be stopped as its own queue: a low-confidence
+        # retest with a long delay keeps the triggered job active.
+        self.config(triggerErrorCodes=[503,429],triggerCooldownMinutes=0,lowConfidencePercent=100,degradedPercent=100,lowConfidenceRetries=5,retryDelaySeconds=3600)
+        self.error_log('third');self.host.tick()
+        live=lambda:[j for j in self.host.request('api/jobs')['jobs'] if j['source']=='error_code' and j['status'] in ('queued','running')]
+        self.assertEqual(len(live()),1)
+        self.host.request('api/cancel',{'source':'manual'});self.assertEqual(len(live()),1)
+        self.host.request('api/cancel',{'source':'error_code'});self.assertEqual(live(),[])
+        self.host.request('api/cancel',{'source':'bogus'},ok=False)
+        # An unreadable log is reported on the page and does not stop detection.
+        self.host.fail_error_log=True;self.host.tick()
+        self.assertIn('读取请求错误日志失败',self.host.request('api/bootstrap')['errorTrigger']['error'])
+        self.host.fail_error_log=False;self.host.tick()
+        self.assertIsNone(self.host.request('api/bootstrap')['errorTrigger']['error'])
+        cfg=self.host.request('api/bootstrap');c=cfg['config'];c['triggerCooldownMinutes']=1441
+        self.host.request('api/config',{'config':c,'revision':cfg['configRevision']},ok=False)
+        # Re-enabling starts a fresh window instead of replaying the disabled period.
+        self.assertIsNotNone(self.host.request('api/bootstrap')['errorTrigger']['since'])
+        self.config(triggerErrorCodes=[]);self.assertFalse(self.host.request('api/bootstrap')['errorTrigger']['enabled'])
+        self.config(triggerErrorCodes=[503]);status=self.host.request('api/bootstrap')['errorTrigger']
+        self.assertTrue(status['enabled']);self.assertIsNone(status['since']);self.assertEqual(status['codes'],[503])
     def arm_due_schedule(self, **overrides):
         cfg=self.config(**overrides)
         cfg['schedule'].update(enabled=True,scope='ids',accountIds=['acct-test'])
@@ -1166,7 +1231,8 @@ class Integration(unittest.TestCase):
         for boundary in ('receipt','sample'):
             with self.subTest(boundary=boundary):
                 if boundary=='sample':
-                    self.host.close();self.host=Host();self.addCleanup(self.host.close)
+                    # Warm the runtime like setUp: a cold release runtime defers the first probe by design.
+                    self.host.close();self.host=Host();self.addCleanup(self.host.close);self.host.request('api/banks/builtin',{})
                 self.config(lowConfidencePercent=0,degradedPercent=100)
                 identity=self.submit();original=self.host.callback;captured=[]
                 def callback(method,p,body):

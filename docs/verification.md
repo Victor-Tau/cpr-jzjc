@@ -1,49 +1,48 @@
-# v1.13.0 验证记录
+# v1.14.0 验证记录
 
-适配 CPR `>=3.38.1,<3.39.0`，Linux x86_64、glibc 2.36+。SDK 与官方打包工具固定至 v3.38.1 提交 `e0b7a841ca074f17e11dad73f39a159c75cb2fb1`。
+适配 CPR `>=3.38.1,<3.39.0`，Linux x86_64、glibc 2.36+。SDK 与官方打包工具仍固定至 v3.38.1 提交 `e0b7a841ca074f17e11dad73f39a159c75cb2fb1`。
 
-## 适配核对
+## 问题复现与根因核对
 
-对比 CPR v3.37.2 与 v3.38.1 的官方源码：SDK 的 `call` 协议类型、能力文档、模型执行回调和官方 CLI 源码保持一致，客户端流读取相关变化为模块重组；宿主插件运行时重组 generation、RPC 流与状态 schema 校验代码。插件继续使用 RPC v7、管理能力 v2、180 秒维护预算和原有私有状态 schema。UI 最新发行仍为 0.8.0，继续使用 `z` 主题变量。
+对照 CPR v3.38.1 源码确认：`/api/admin/usage/records` 列表视图（`UsageListRecordView`）不含 HTTP 状态字段，`errorCode` 映射自 `provider_error_code`（如 `server_is_overloaded`）；`OpenAI upstream failure: kind=…, status=503` 是 Provider 诊断信息，写入请求的 `error_message` 与运维事件的 `message`。换号重试成功的中间失败只写入 `ops_events`。运维错误列表 `/api/admin/operations/errors` 合并请求错误与运维事件，提供 `upstreamStatusCode`、`clientStatusCode`、`message`、`requestKind` 与 `subagentKind`，插件子请求标记为 `plugin_bound_model`/`plugin_child_model` 并带插件实例 ID。
 
-CPR 3.38.1 加强原生 Responses 请求的账号模型资格检查。插件继续使用宿主模型执行链路，按账户 ID 固定检测目标，由宿主检查 Key、模型目录与账户权限；未绕过新版调度规则。插件不实现 CPR Link 快照协议，无需引入 Link v2 字段转换。
+## 构建
 
-## 单核构建
-
-官方 CLI、前端构建、Rust 检查与发布编译、Python 和 RPC 回归、浏览器验证全部绑定 CPU 0（`taskset -c 0`），重型步骤串行执行，使用 `nice -n 10` 与空闲 I/O 优先级。设置 `CARGO_BUILD_JOBS=1`、`RAYON_NUM_THREADS=1`、`UV_THREADPOOL_SIZE=1`、`OPENBLAS_NUM_THREADS=1`、`OMP_NUM_THREADS=1`、`RUST_TEST_THREADS=1`，Rust release 使用 `codegen-units=1`。
-
-使用 Rust 1.99.1、Node 24.22.0、pnpm 10.32.1、Zig 0.13.0。Rust 锁文件仅变更插件版本与 SDK 提交，前端依赖及锁文件保持原版本，使用已有依赖离线校验锁文件后构建。官方 CLI 使用 CPR v3.38.1 的 workspace 锁文件离线编译。Python/NumPy 依赖未变，从已校验的 1.12.0 包复用运行时并刷新源码与许可。
+发布二进制编译与官方 CLI 打包绑定 CPU 0（`taskset -c 0`、`nice -n 10`、`CARGO_BUILD_JOBS=1`），Rust release 使用 `codegen-units=1`；回归测试在其余核心并行执行。使用 Rust 1.99.1、Node 24.22.2、pnpm 9.12.2、Zig 0.15.2，官方 CLI 由 CPR v3.38.1 源码编译。Rust 与前端锁文件仅变更插件版本，依赖不变。Python/NumPy 依赖未变，从已校验摘要的 1.13.0 发布包复用运行时并刷新评分与上游源码；第三方许可证条目与 1.13.0 相同。
 
 ## 验证结果
 
-- Rust 格式检查、21 项单元测试与 Clippy `-D warnings` 通过。
-- TypeScript 类型检查、前端生产构建及分页接口回归通过。
-- Python 评分 6 项单元测试通过。
-- 最终安装包摘要、全部资源摘要、RPC v7、宿主范围、18 个模型离线校验、Rust 运行时解包与完整评分通过。
-- 1.12.0 → 1.13.0 升级验证通过，保留配置、计划、历史和指纹库，无检测请求重放。
-- 最高导入 GLIBC 符号版本为 2.34。
-- 最终安装包的 73 项 RPC 集成场景全部通过，耗时 511.115 秒，覆盖 121 秒长请求、16 路并发、取消与重启、手动和定时任务公平调度、账户操作重试、指纹库更新与大列表分页。
-- 浏览器使用最终包生成的模拟数据与生产前端，账户和历史筛选、批量提交、设置与备份、报告、指纹库更新、实时进度、明暗主题、移动布局和隔离页面全部通过，页面错误为 0。
+- Rust 格式检查、Clippy `-D warnings` 与 25 项单元测试通过；新增用例覆盖诊断信息 `status=503` 解析、CPR 3.38.1 运维错误条目、插件自身请求识别、冷却配置边界与旧配置补齐。
+- TypeScript 类型检查、前端生产构建、Python 评分 6 项单元测试与分页接口回归通过。
+- 最终安装包摘要、全部资源摘要、RPC v7、宿主范围、18 个模型离线校验、Rust 运行时解包与完整评分通过；最高导入 GLIBC 符号版本为 2.34。
+- 最终安装包二进制的 75 项 RPC 集成场景全部通过，耗时 534.163 秒。新增场景覆盖仅在诊断信息中出现 503 的运维事件触发检测、账户 ID 与邮箱匹配、去重、冷却、插件自身请求与本插件请求 ID 排除、日志读取失败提示与恢复、停用后重新开启的读取窗口，以及按 `error_code` 来源停止队列。
+- 1.13.0 → 1.14.0 升级验证通过，保留配置、计划、历史和指纹库，无检测请求重放。
+- 浏览器使用最终包生成的模拟数据与生产前端，39 组检查全部通过，页面错误为 0：账户与历史筛选、统计卡片、日志触发状态（未开启、监听、命中、读取错误）、日志触发来源标签与停止日志触发队列、结论去重显示、报告摘要与触发来源、降级模型高亮、设置分区与保存、备份导入、指纹库更新、实时进度、明暗主题、移动布局和隔离页面。
 
-发布编译耗时 1 分 54 秒，链接仅显示 Zig 既有优化参数弃用提示。安装包：`dist/personal.modeltrace-health-1.13.0-x86_64-unknown-linux-gnu.tar.gz`，30,790,101 字节。
+安装包：`dist/personal.modeltrace-health-1.14.0-x86_64-unknown-linux-gnu.tar.gz`，30,825,120 字节。
 
-SHA-256：`a43f2477da05d4659a49b1105930a4f347d6b6665cc2de6cf7c5eba8e6d62dc9`。
+SHA-256：`1478a3759674e0fe5ca3950e8a2e7d16ce5a73b4b4d687a6dcfa0fcd64656eb1`。
 
 ```bash
-source .cache/env-v173.sh
 export RUST_TEST_THREADS=1
-taskset -c 0 cargo test --manifest-path backend/Cargo.toml --locked --offline
-taskset -c 0 cargo clippy --manifest-path backend/Cargo.toml --locked --offline -- -D warnings
-taskset -c 0 cargo zigbuild --manifest-path backend/Cargo.toml --locked --offline --release --target x86_64-unknown-linux-gnu.2.36
-taskset -c 0 .venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.13.0-x86_64-unknown-linux-gnu.tar.gz
-taskset -c 0 .venv/bin/python scripts/upgrade_smoke.py dist/personal.modeltrace-health-1.12.0-x86_64-unknown-linux-gnu.tar.gz dist/personal.modeltrace-health-1.13.0-x86_64-unknown-linux-gnu.tar.gz
-taskset -c 0 .venv/bin/python scripts/protocol_smoke.py --binary .cache/release-v1.13.0/bin/modeltrace-health -v
+taskset -c 0 cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu.2.36
+cpr-plugin package --manifest plugin.json --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health \
+  --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
+.venv/bin/python scripts/verify_artifact.py dist/personal.modeltrace-health-1.14.0-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/upgrade_smoke.py dist/personal.modeltrace-health-1.13.0-x86_64-unknown-linux-gnu.tar.gz dist/personal.modeltrace-health-1.14.0-x86_64-unknown-linux-gnu.tar.gz
+.venv/bin/python scripts/protocol_smoke.py --binary .cache/release-v1.14.0/bin/modeltrace-health -v
+.venv/bin/python scripts/ui_fixture.py --binary .cache/release-v1.14.0/bin/modeltrace-health
+PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin node scripts/ui_smoke.mjs
 ```
+
+## 测试修正
+
+`test_restart_replays_receipt_and_saved_sample_without_model_request` 的 `sample` 子场景新建模拟宿主后未像其他用例一样预热评分运行时。发布二进制首次解包运行时后按设计将首个请求推迟到下一次维护，导致该子场景在发布二进制上固定失败（已发布的 1.13.0 安装包同样复现，开发构建使用本地 Python 不受影响）。现补齐预热，插件代码未因此修改；1.13.0、1.14.0 发布二进制及开发构建各重复 3 次均通过。
 
 ## 验证边界
 
-集成验证使用最终发布包二进制、生产前端与模拟宿主，不访问真实账号，未在生产 CPR 宿主安装。浏览器使用模拟数据，在允许启动 Chromium 的环境执行。
+集成验证使用最终发布包二进制、生产前端与模拟宿主；运维错误日志由模拟宿主按 CPR v3.38.1 字段返回。未在生产 CPR 宿主安装，也未访问真实账号。浏览器使用模拟数据。
 
 ## 历史验证
 
-[1.12.0](verification-v1.12.0.md)、[1.10.0](verification-v1.10.0.md)、[1.9.0](verification-v1.9.0.md)、[1.8.2](verification-v1.8.2.md)。
+[1.13.0](verification-v1.13.0.md)、[1.12.0](verification-v1.12.0.md)、[1.10.0](verification-v1.10.0.md)、[1.9.0](verification-v1.9.0.md)、[1.8.2](verification-v1.8.2.md)。

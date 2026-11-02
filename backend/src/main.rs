@@ -35,8 +35,8 @@ fn cancel_source(body: &Value) -> Result<Option<&str>, PluginFault> {
     match body.get("source").filter(|value| !value.is_null()) {
         None => Ok(None),
         Some(value) => match value.as_str() {
-            Some(source @ ("manual" | "schedule")) => Ok(Some(source)),
-            _ => Err(host::fault("检测来源必须为 manual 或 schedule")),
+            Some(source @ ("manual" | "schedule" | "error_code")) => Ok(Some(source)),
+            _ => Err(host::fault("检测来源必须为 manual、schedule 或 error_code")),
         },
     }
 }
@@ -111,7 +111,7 @@ async fn handle(
     };
     match (call.request.method.as_str(), call.request.path.as_str()) {
         ("GET", "api/bootstrap") => Ok(
-            json!({"config":m.control.config,"configRevision":m.control.config_revision,"banks":m.bank_status(),"keys":host::keys(h).await?,"groups":host::groups(h).await?,"jobs":m.summaries(),"nextDue":m.control.next_due,"scheduleError":m.control.schedule_error,"lastScheduleAt":m.control.last_schedule_at}),
+            json!({"config":m.control.config,"configRevision":m.control.config_revision,"banks":m.bank_status(),"keys":host::keys(h).await?,"groups":host::groups(h).await?,"jobs":m.summaries(),"nextDue":m.control.next_due,"scheduleError":m.control.schedule_error,"lastScheduleAt":m.control.last_schedule_at,"errorTrigger":m.trigger_status()}),
         ),
         ("GET", "api/accounts") => {
             let offset = query("offset").parse::<usize>().unwrap_or(0);
@@ -133,7 +133,7 @@ async fn handle(
             .read(Some(query("since").as_str()), true)
             .ok_or_else(|| host::fault("进度尚未准备")),
         ("GET", "api/jobs") => Ok(
-            json!({"jobs":m.summaries(),"banks":m.bank_status(),"nextDue":m.control.next_due,"scheduleError":m.control.schedule_error}),
+            json!({"jobs":m.summaries(),"banks":m.bank_status(),"nextDue":m.control.next_due,"scheduleError":m.control.schedule_error,"errorTrigger":m.trigger_status()}),
         ),
         ("GET", "api/report") => {
             let id = query("id");
@@ -350,6 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .host
                         .remaining_budget()
                         .ok_or_else(|| host::fault("维护预算不可用"))?;
+                    m.instance_id.clone_from(&call.context.instance_id);
                     let result = m.tick(&call.host, budget).await;
                     guard.armed = false;
                     if let Err(e) = result {

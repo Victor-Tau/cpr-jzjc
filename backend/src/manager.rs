@@ -35,7 +35,32 @@ pub struct Control {
     /// Request-log records already considered by the automatic trigger.
     #[serde(default)]
     pub error_trigger_seen: Vec<String>,
+    /// Poll window and last outcome of the request-log trigger.
+    #[serde(default)]
+    pub error_trigger: TriggerStatus,
 }
+
+/// Request-log trigger state shown on the accounts page. `since` is the
+/// watermark of the last successful poll; the next poll re-reads a short
+/// overlap because CPR may persist failures after their timestamps.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TriggerStatus {
+    pub since: Option<u64>,
+    pub checked_at: Option<u64>,
+    pub error: Option<String>,
+    pub matched_at: Option<u64>,
+    pub matched_account: Option<String>,
+    pub matched_code: Option<u16>,
+    pub matched_total: u64,
+}
+
+/// Re-read window for late-persisted log entries.
+const TRIGGER_OVERLAP_MS: u64 = 5 * 60 * 1000;
+/// First poll after enabling, and the maximum catch-up after downtime.
+const TRIGGER_LOOKBACK_MS: u64 = 15 * 60 * 1000;
+const TRIGGER_MAX_LOOKBACK_MS: u64 = 60 * 60 * 1000;
+const TRIGGER_SEEN_LIMIT: usize = 1024;
 impl Default for Control {
     fn default() -> Self {
         let b = banks::builtin();
@@ -53,6 +78,7 @@ impl Default for Control {
             last_schedule_at: None,
             pending_schedule: None,
             error_trigger_seen: vec![],
+            error_trigger: TriggerStatus::default(),
         }
     }
 }
@@ -68,6 +94,8 @@ pub struct Manager {
     request_window: std::time::Duration,
     last_job_source: Option<String>,
     score_bank: Option<(String, std::path::PathBuf)>,
+    /// Host instance ID, used to ignore this plugin's own probe failures.
+    pub instance_id: String,
 }
 impl Manager {
     pub fn new(progress: Arc<Progress>) -> Self {
@@ -83,6 +111,7 @@ impl Manager {
             request_window: std::time::Duration::ZERO,
             last_job_source: None,
             score_bank: None,
+            instance_id: String::new(),
         }
     }
     /// Shared with the RPC layer so an interrupted maintenance callback can
@@ -110,6 +139,7 @@ impl Manager {
             self.control.schedule_error.clone(),
             reports,
         );
+        self.progress.set_trigger(self.trigger_status());
     }
     async fn save_job(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
         let (j, v) = &mut self.jobs[i];
@@ -256,7 +286,7 @@ impl Manager {
         json!({"active":self.active_bank(),"previous":self.control.previous_bank.as_ref().and_then(|h|self.control.banks.iter().find(|b|&b.hash==h)),"builtin":banks::builtin(),"update":self.control.update,"engineCommit":banks::engine_commit()})
     }
     pub fn summaries(&self) -> Vec<Value> {
-        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state})).collect()
+        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state,"triggerCode":j.trigger.as_ref().map(|t|t.code)})).collect()
     }
     async fn prepare_score(
         &mut self,
@@ -315,6 +345,16 @@ impl Manager {
             } else {
                 None
             };
+        }
+        // Re-enabling starts from a fresh short window instead of replaying
+        // errors logged while the trigger was off; disabling clears stale errors.
+        match (
+            self.control.config.trigger_error_codes.is_empty(),
+            config.trigger_error_codes.is_empty(),
+        ) {
+            (true, false) => self.control.error_trigger.since = None,
+            (false, true) => self.control.error_trigger.error = None,
+            _ => {}
         }
         self.control.config = config;
         self.control.config_revision += 1;
@@ -428,6 +468,7 @@ impl Manager {
                 disable_error: None,
                 group_state: "none".into(),
                 group_error: None,
+                trigger: None,
             };
             // A deterministic key makes replay after an interrupted submission idempotent.
             let old = host::state_get(host, "jobs", &id).await?;
@@ -1066,77 +1107,181 @@ impl Manager {
         Ok(())
     }
 
-    /// Poll CPR's request log and enqueue the normal detection workflow for
-    /// accounts whose configured error code was observed. The endpoint was
-    /// added in CPR 3.36; an unavailable log endpoint is intentionally
-    /// non-fatal so existing manual and scheduled checks keep working.
+    /// Poll CPR's request error log and enqueue the normal detection workflow
+    /// for accounts whose configured HTTP status was observed. Failures to
+    /// read the log are recorded for the page but never stop other work.
     async fn poll_error_triggers(&mut self, host: &HostClient) -> Result<(), PluginFault> {
-        let codes = &self.control.config.trigger_error_codes;
-        if codes.is_empty() || self.remaining() < std::time::Duration::from_secs(3) {
+        if self.control.config.trigger_error_codes.is_empty() {
             return Ok(());
         }
-        let records = match host::request_logs(host).await {
+        if self.remaining() < std::time::Duration::from_secs(8) {
+            return Ok(());
+        }
+        let started = now();
+        let since = self
+            .control
+            .error_trigger
+            .since
+            .map_or(started.saturating_sub(TRIGGER_LOOKBACK_MS), |since| {
+                since.saturating_sub(TRIGGER_OVERLAP_MS)
+            })
+            .max(started.saturating_sub(TRIGGER_MAX_LOOKBACK_MS));
+        let previous_error = self.control.error_trigger.error.clone();
+        let previous_since = self.control.error_trigger.since;
+        self.control.error_trigger.checked_at = Some(started);
+        let records = match host::request_logs(host, since).await {
             Ok(records) => records,
-            Err(_) => return Ok(()),
+            Err(e) => {
+                self.control.error_trigger.error =
+                    Some(format!("读取请求错误日志失败：{}", e.message));
+                if previous_error != self.control.error_trigger.error {
+                    self.save(host).await?;
+                }
+                return Ok(());
+            }
         };
-        if records.is_empty() {
-            return Ok(());
-        }
-        let accounts = match host::accounts(host).await {
-            Ok(accounts) => accounts,
-            Err(_) => return Ok(()),
-        };
-        let mut candidates = std::collections::BTreeMap::<String, String>::new();
-        let mut changed = false;
+        self.control.error_trigger.error = None;
+        self.control.error_trigger.since = Some(started);
+        let own_requests: BTreeSet<&str> = self
+            .jobs
+            .iter()
+            .flat_map(|(j, _)| j.attempts.iter())
+            .filter_map(|a| a.request_id.as_deref())
+            .collect();
+        let mut fresh = vec![];
         for record in records {
-            if self
-                .control
-                .error_trigger_seen
-                .iter()
-                .any(|key| key == &record.key)
-            {
+            if self.control.error_trigger_seen.contains(&record.key) {
                 continue;
             }
+            let own = record.plugin_instance.as_deref() == Some(self.instance_id.as_str())
+                || record
+                    .request_id
+                    .as_deref()
+                    .is_some_and(|id| own_requests.contains(id));
+            let codes = &self.control.config.trigger_error_codes;
+            let matched = (!own)
+                .then(|| record.codes.iter().copied().find(|c| codes.contains(c)))
+                .flatten();
+            fresh.push((record, matched));
+        }
+        drop(own_requests);
+        // Persist the watermark when entries arrive, an error clears, or the
+        // stored value is old enough that a restart would re-read too much.
+        let changed = !fresh.is_empty()
+            || previous_error.is_some()
+            || previous_since.is_none_or(|at| started.saturating_sub(at) >= TRIGGER_OVERLAP_MS);
+        let accounts = if fresh.iter().any(|(_, matched)| matched.is_some()) {
+            match host::accounts(host).await {
+                Ok(accounts) => accounts,
+                Err(e) => {
+                    // Leave the entries unseen so the next poll retries them.
+                    self.control.error_trigger.since = previous_since;
+                    self.control.error_trigger.error = Some(format!("读取账户失败：{}", e.message));
+                    self.save(host).await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            vec![]
+        };
+        let cooldown = u64::from(self.control.config.trigger_cooldown_minutes) * 60_000;
+        let mut candidates =
+            std::collections::BTreeMap::<String, (host::RequestLog, u16, String)>::new();
+        for (record, matched) in fresh {
             self.control.error_trigger_seen.push(record.key.clone());
-            changed = true;
-            let Some(code) = record.code else { continue };
-            if !codes.contains(&code) {
-                continue;
-            }
+            let Some(code) = matched else { continue };
             let account = record
                 .account_id
                 .as_deref()
                 .and_then(|id| accounts.iter().find(|a| a.id == id))
                 .or_else(|| {
-                    record.account_name.as_deref().and_then(|name| {
+                    [
+                        record.account_email.as_deref(),
+                        record.account_name.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|name| {
                         accounts.iter().find(|a| {
-                            a.id == name || a.name == name || a.email.as_deref() == Some(name)
+                            a.id == name || a.email.as_deref() == Some(name) || a.name == name
                         })
                     })
                 });
             let Some(account) = account.filter(|a| a.enabled && a.supported) else {
                 continue;
             };
-            candidates.entry(account.id.clone()).or_insert(record.key);
+            // One check per account: skip while any detection runs, and for
+            // the cooldown after the previous log-triggered check started.
+            let busy = self.jobs.iter().any(|(j, _)| {
+                j.account_id == account.id
+                    && (j.active()
+                        || (j.source == "error_code"
+                            && started.saturating_sub(j.created_at) < cooldown))
+            });
+            if busy {
+                continue;
+            }
+            let label = account
+                .email
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| account.name.clone());
+            candidates
+                .entry(account.id.clone())
+                .or_insert((record, code, label));
         }
-        if self.control.error_trigger_seen.len() > 512 {
-            let keep_from = self.control.error_trigger_seen.len() - 512;
+        if self.control.error_trigger_seen.len() > TRIGGER_SEEN_LIMIT {
+            let keep_from = self.control.error_trigger_seen.len() - TRIGGER_SEEN_LIMIT;
             self.control.error_trigger_seen.drain(..keep_from);
         }
-        for (account_id, key) in candidates {
-            let _ = self
-                .submit(
-                    host,
-                    vec![account_id],
-                    &format!("request-log-{key}"),
-                    "error_code",
-                )
-                .await;
+        for (account_id, (record, code, label)) in candidates {
+            let request = format!("request-log-{}", &banks::hash(record.key.as_bytes())[..32]);
+            match self
+                .submit(host, vec![account_id], &request, "error_code")
+                .await
+            {
+                Ok(ids) => {
+                    if let Some(i) = ids
+                        .first()
+                        .and_then(|id| self.jobs.iter().position(|(j, _)| &j.id == id))
+                        .filter(|i| self.jobs[*i].0.trigger.is_none())
+                    {
+                        self.jobs[i].0.trigger = Some(TriggerSource {
+                            code,
+                            request_id: record.request_id,
+                            message: record.message,
+                            observed_at: started,
+                        });
+                        self.jobs[i].0.message = format!("请求日志出现 {code}，已自动排队检测");
+                        self.save_job(host, i).await?;
+                    }
+                    let status = &mut self.control.error_trigger;
+                    status.matched_at = Some(now());
+                    status.matched_account = Some(label);
+                    status.matched_code = Some(code);
+                    status.matched_total += 1;
+                }
+                Err(e) => {
+                    if !self.loaded {
+                        return Err(e);
+                    }
+                    self.control.error_trigger.error =
+                        Some(format!("{label} 触发检测失败：{}", e.message));
+                }
+            }
         }
-        if changed {
+        if changed || self.control.error_trigger.error != previous_error {
             self.save(host).await?;
+        } else {
+            self.progress.set_trigger(self.trigger_status());
         }
         Ok(())
+    }
+    pub fn trigger_status(&self) -> Value {
+        let mut status = serde_json::to_value(&self.control.error_trigger).unwrap();
+        status["enabled"] = json!(!self.control.config.trigger_error_codes.is_empty());
+        status["codes"] = json!(self.control.config.trigger_error_codes);
+        status
     }
     fn remaining(&self) -> std::time::Duration {
         self.deadline

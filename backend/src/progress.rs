@@ -24,6 +24,7 @@ struct Snapshot {
     banks: Value,
     next_due: Option<u64>,
     schedule_error: Option<String>,
+    trigger: Value,
 }
 
 impl Progress {
@@ -72,6 +73,15 @@ impl Progress {
         s.revision += 1;
     }
 
+    /// Request-log trigger status; only bumps the revision when it changes.
+    pub fn set_trigger(&self, trigger: Value) {
+        let mut s = self.state.write().unwrap();
+        if s.trigger != trigger {
+            s.trigger = trigger;
+            s.revision += 1;
+        }
+    }
+
     pub fn phase(&self, id: &str, stage: &str, detail: Value) {
         let mut s = self.state.write().unwrap();
         let started = s
@@ -107,7 +117,7 @@ impl Progress {
         }
         let revision = format!("{}:{}", s.epoch, s.revision);
         let changed = since != Some(revision.as_str());
-        let mut v = json!({"revision":revision,"changed":changed,"jobs":if changed {Some(Self::jobs(&s))}else{None},"nextDue":s.next_due,"scheduleError":s.schedule_error});
+        let mut v = json!({"revision":revision,"changed":changed,"jobs":if changed {Some(Self::jobs(&s))}else{None},"nextDue":s.next_due,"scheduleError":s.schedule_error,"errorTrigger":s.trigger});
         if !lightweight {
             v["banks"] = s.banks.clone();
         }

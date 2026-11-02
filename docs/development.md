@@ -97,7 +97,7 @@ cpr-plugin package --manifest plugin.json \
   --binary backend/target/x86_64-unknown-linux-gnu/release/modeltrace-health \
   --target x86_64-unknown-linux-gnu --resource-map web=frontend/dist --output-dir dist
 python scripts/verify_artifact.py \
-  dist/personal.modeltrace-health-1.13.0-x86_64-unknown-linux-gnu.tar.gz
+  dist/personal.modeltrace-health-1.14.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 运行时脚本验证固定基础镜像配置、镜像层和 NumPy wheel 摘要，不依赖 Docker 守护进程。已有由 crane 拉取的基础归档时，可传入 `--base-tar /path/to/python-base.tar`。
@@ -122,7 +122,14 @@ PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin \
 PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin node scripts/ui_smoke.mjs
 ```
 
-系统需具备 Chromium 运行依赖和中文字体。截图输出到 `.cache/accounts.png`、`.cache/settings.png`、`.cache/report.png` 与 `.cache/mobile.png`；公开截图使用模拟数据。
+系统需具备 Chromium 运行依赖和中文字体。截图默认输出到 `.cache/`，包括 `accounts.png`、`settings.png`、`report.png`、`history.png` 与 `mobile.png`；公开截图使用模拟数据。
+
+`ui_smoke.mjs` 支持两个可选环境变量，便于并行构建时互不覆盖：`UI_DIST` 指定已构建页面目录（默认 `frontend/dist`），`UI_SHOTS` 指定截图目录（默认 `.cache`），相对路径以仓库根目录为基准：
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin UI_DIST=/path/to/dist UI_SHOTS=/path/to/shots \
+  node scripts/ui_smoke.mjs
+```
 
 安装 strace 后，可验证禁止恢复时间戳的环境：
 
@@ -151,10 +158,12 @@ bash scripts/restricted_runtime_smoke.sh /path/to/package/bin/modeltrace-health
 | POST | `api/submit` | `{accountIds, requestId}` 幂等提交 |
 | GET | `api/jobs` / `api/report?id=...` | 任务列表及报告 |
 | GET | `api/progress?since=...` | 进度快照；未变化时返回 `changed=false,jobs=null` |
-| POST | `api/cancel` | 可选 `{id, source}`；`source` 为 `manual` 或 `schedule`，均省略时取消全部队列 |
+| POST | `api/cancel` | 可选 `{id, source}`；`source` 为 `manual`、`schedule` 或 `error_code`，均省略时取消全部队列 |
 | POST | `api/delete` | `{id}` 或 `{ids}` 删除历史；批量返回 `deleted`、`skipped` |
 | POST | `api/retry-disable` / `api/retry-group` | `{id}` 重试关闭调度或移组 |
 | POST | `api/banks/check` / `api/banks/apply` / `api/banks/rollback` / `api/banks/builtin` | 检查、应用、回退或恢复内置库 |
+
+1.14.0 起，`api/bootstrap`、`api/jobs` 与 `api/progress` 附带 `errorTrigger` 请求日志触发状态（最近读取、最近命中、累计触发次数与读取错误）。
 
 1.10.0 起，大列表响应附带 `pagination: {field, nextOffset, snapshot}`，单页预算为 768 KiB。后续请求保留原查询参数，并附加 `pageOffset` 与 `pageSnapshot`；`nextOffset=null` 表示结束。快照变化返回 HTTP 409 和 `error.code=pagination_changed`，客户端应放弃部分数据并从头读取。`frontend/src/api.ts` 已实现完整合并和有限重读，写操作不会因分页自动重试。
 

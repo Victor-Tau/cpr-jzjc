@@ -140,7 +140,7 @@ pub async fn admin(
         if let HttpFrame::Data(c) = frame {
             if bytes.len() + c.len() > 2 * 1024 * 1024 {
                 let _ = r.body.close().await;
-                return Err(fault("账户列表响应过大"));
+                return Err(fault("宿主管理接口响应过大"));
             }
             bytes.extend(c);
         }
@@ -208,17 +208,39 @@ pub async fn accounts(host: &HostClient) -> Result<Vec<Account>, PluginFault> {
     Err(fault("账户数量超过100000"))
 }
 
-#[derive(Clone, Debug)]
+/// One failed upstream attempt or request read from the CPR error log.
+#[derive(Clone, Debug, PartialEq)]
 pub struct RequestLog {
+    /// Stable identity of the log entry, used for persistent deduplication.
     pub key: String,
+    pub request_id: Option<String>,
     pub account_id: Option<String>,
     pub account_name: Option<String>,
-    pub code: Option<u16>,
+    pub account_email: Option<String>,
+    /// Every HTTP status the entry reports, upstream first.
+    pub codes: Vec<u16>,
+    /// Plugin instance that issued the request, when it was a plugin model call.
+    pub plugin_instance: Option<String>,
+    /// Short diagnostic shown in the job report.
+    pub message: Option<String>,
+}
+
+/// Log pages read per maintenance callback; the window is short, so this is
+/// only reached by deployments producing hundreds of errors per minute.
+const ERROR_LOG_PAGE_SIZE: usize = 50;
+const ERROR_LOG_PAGES: usize = 10;
+
+fn first<'a>(item: &'a Value, names: &[&str]) -> Option<&'a Value> {
+    names
+        .iter()
+        .find_map(|name| item.get(*name).filter(|value| !value.is_null()))
 }
 
 fn value_string(value: &Value) -> Option<String> {
     value
         .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .or_else(|| value.as_u64().map(|n| n.to_string()))
 }
@@ -228,74 +250,144 @@ fn value_code(value: &Value) -> Option<u16> {
         .as_u64()
         .and_then(|n| u16::try_from(n).ok())
         .or_else(|| value.as_str()?.trim().parse().ok())
+        .filter(|code| (100..=599).contains(code))
 }
 
-/// Reads the most recent request records exposed by CPR 3.36. Field names are
-/// accepted in both API casing styles because deployments may proxy older
-/// response serializers.
-pub async fn request_logs(host: &HostClient) -> Result<Vec<RequestLog>, PluginFault> {
-    let data = admin(
-        host,
-        "GET",
-        "/api/admin/usage/records?currentPage=1&pageSize=100&status=all&period=today",
-        None,
-    )
-    .await?;
-    let items = data["items"]
-        .as_array()
-        .or_else(|| data["records"].as_array())
-        .or_else(|| data.as_array())
-        .ok_or_else(|| fault("请求日志格式无效"))?;
-    let mut result = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
-        let account = item.get("account").unwrap_or(&Value::Null);
-        let account_id = value_string(
-            item.get("accountId")
-                .or_else(|| item.get("account_id"))
-                .unwrap_or(&Value::Null),
+/// Finds HTTP statuses embedded in diagnostics such as
+/// `OpenAI upstream failure: kind=upstream_capacity_unavailable, status=503`.
+/// Only a standalone three-digit number directly after `status` is accepted.
+pub fn message_codes(text: &str) -> Vec<u16> {
+    let lower = text.to_ascii_lowercase();
+    let mut codes = vec![];
+    let mut offset = 0;
+    while let Some(found) = lower[offset..].find("status") {
+        let mut rest = &lower[offset + found + "status".len()..];
+        for suffix in ["_code", "code"] {
+            if let Some(stripped) = rest.strip_prefix(suffix) {
+                rest = stripped;
+                break;
+            }
+        }
+        let rest = rest.trim_start_matches(['=', ':', ' ', '"', '\'']);
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 3
+            && let Ok(code) = rest[..3].parse::<u16>()
+            && (100..=599).contains(&code)
+            && !codes.contains(&code)
+        {
+            codes.push(code);
+        }
+        offset += found + "status".len();
+    }
+    codes
+}
+
+/// Normalizes one entry of CPR's operations error list. Usage-record field
+/// names are accepted as well so a proxied or older serializer still works.
+pub fn parse_request_log(item: &Value) -> Option<RequestLog> {
+    let id = first(item, &["id", "requestId", "request_id"]).and_then(value_string)?;
+    let source = item
+        .get("metadata")
+        .and_then(|m| m.get("source"))
+        .and_then(value_string)
+        .unwrap_or_else(|| "request".into());
+    let account = item.get("account").unwrap_or(&Value::Null);
+    let mut codes = vec![];
+    for name in [
+        "upstreamStatusCode",
+        "upstream_status_code",
+        "clientStatusCode",
+        "client_status_code",
+        "statusCode",
+        "status_code",
+        "errorCode",
+        "error_code",
+    ] {
+        if let Some(code) = item.get(name).and_then(value_code)
+            && !codes.contains(&code)
+        {
+            codes.push(code);
+        }
+    }
+    if let Some(code) = item
+        .get("error")
+        .and_then(|e| e.get("code"))
+        .and_then(value_code)
+        && !codes.contains(&code)
+    {
+        codes.push(code);
+    }
+    for name in ["message", "errorMessage", "error_message"] {
+        if let Some(text) = item.get(name).and_then(Value::as_str) {
+            for code in message_codes(text) {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+        }
+    }
+    let plugin_instance = first(item, &["requestKind", "request_kind"])
+        .and_then(Value::as_str)
+        .filter(|kind| kind.starts_with("plugin_"))
+        .and(first(item, &["subagentKind", "subagent_kind"]))
+        .and_then(value_string);
+    Some(RequestLog {
+        key: format!("{source}:{id}"),
+        request_id: first(item, &["requestId", "request_id"])
+            .and_then(value_string)
+            .or_else(|| (source != "ops_event").then(|| id.clone())),
+        account_id: first(item, &["accountId", "account_id"])
+            .or_else(|| account.get("id"))
+            .and_then(value_string),
+        account_name: first(item, &["accountName", "account_name"])
+            .or_else(|| account.get("name"))
+            .and_then(value_string),
+        account_email: first(item, &["accountEmail", "account_email"])
+            .or_else(|| account.get("email"))
+            .and_then(value_string),
+        codes,
+        plugin_instance,
+        message: first(item, &["message", "errorMessage", "error_message"])
+            .and_then(Value::as_str)
+            .map(|text| text.chars().take(240).collect()),
+    })
+}
+
+/// Reads CPR's operations error log since `since_ms`. Unlike usage records,
+/// this list carries the upstream HTTP status and also includes intermediate
+/// failures that CPR recovered by switching to another account.
+pub async fn request_logs(
+    host: &HostClient,
+    since_ms: u64,
+) -> Result<Vec<RequestLog>, PluginFault> {
+    let start = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(since_ms as i64)
+        .ok_or_else(|| fault("请求日志时间范围无效"))?
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut result = vec![];
+    for page in 1..=ERROR_LOG_PAGES {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("currentPage", &page.to_string())
+            .append_pair("pageSize", &ERROR_LOG_PAGE_SIZE.to_string())
+            .append_pair("startTime", &start)
+            .finish();
+        let data = admin(
+            host,
+            "GET",
+            &format!("/api/admin/operations/errors?{query}"),
+            None,
         )
-        .or_else(|| value_string(account.get("id").unwrap_or(&Value::Null)));
-        let account_name = value_string(
-            item.get("accountName")
-                .or_else(|| item.get("account_name"))
-                .unwrap_or(&Value::Null),
-        )
-        .or_else(|| value_string(account.get("name").unwrap_or(&Value::Null)));
-        let code = value_code(
-            item.get("errorCode")
-                .or_else(|| item.get("error_code"))
-                .unwrap_or(&Value::Null),
-        )
-        .or_else(|| {
-            value_code(
-                item.get("statusCode")
-                    .or_else(|| item.get("status_code"))
-                    .unwrap_or(&Value::Null),
-            )
-        })
-        .or_else(|| {
-            item.get("error")
-                .and_then(|e| value_code(e.get("code").unwrap_or(&Value::Null)))
-        });
-        let id = value_string(
-            item.get("id")
-                .or_else(|| item.get("requestId"))
-                .or_else(|| item.get("request_id"))
-                .unwrap_or(&Value::Null),
-        )
-        .unwrap_or_else(|| serde_json::to_string(item).unwrap_or_else(|_| index.to_string()));
-        let key = format!(
-            "{}:{}:{}",
-            id,
-            account_id.as_deref().unwrap_or_default(),
-            code.unwrap_or_default()
-        );
-        result.push(RequestLog {
-            key,
-            account_id,
-            account_name,
-            code,
-        });
+        .await?;
+        let items = data["items"]
+            .as_array()
+            .ok_or_else(|| fault("请求错误日志格式无效"))?;
+        result.extend(items.iter().filter_map(parse_request_log));
+        if items.len() < ERROR_LOG_PAGE_SIZE
+            || data["total"]
+                .as_u64()
+                .is_some_and(|total| (page * ERROR_LOG_PAGE_SIZE) as u64 >= total)
+        {
+            break;
+        }
     }
     Ok(result)
 }
@@ -796,6 +888,66 @@ impl StreamResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_is_read_from_upstream_failure_message() {
+        let text = "OpenAI upstream failure: kind=upstream_capacity_unavailable, status=503";
+        assert_eq!(message_codes(text), vec![503]);
+        assert_eq!(message_codes("statusCode: 429; status=429"), vec![429]);
+        assert_eq!(message_codes("status=none"), Vec::<u16>::new());
+        assert_eq!(message_codes("status=5030 status=99"), Vec::<u16>::new());
+        assert_eq!(message_codes("request 503 failed"), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn cpr_error_log_entry_matches_status_and_account() {
+        // Shape of /api/admin/operations/errors items in CPR 3.38.1.
+        let item = json!({
+            "id": "req-1", "requestId": "req-1", "kind": "model_request",
+            "accountId": "acct-7", "accountName": "worker", "accountEmail": "w@example.com",
+            "clientStatusCode": 502, "upstreamStatusCode": 503,
+            "providerErrorCode": "server_is_overloaded",
+            "requestKind": null, "subagentKind": null,
+            "message": "OpenAI upstream failure: kind=upstream_capacity_unavailable, status=503",
+            "metadata": {"source": "model_request"}
+        });
+        let log = parse_request_log(&item).unwrap();
+        assert_eq!(log.key, "model_request:req-1");
+        assert_eq!(log.account_id.as_deref(), Some("acct-7"));
+        assert_eq!(log.codes, vec![503, 502]);
+        assert_eq!(log.plugin_instance, None);
+        // Intermediate failures are ops events: status only in the message.
+        let event = json!({
+            "id": "evt-9", "requestId": "req-2", "accountId": "acct-8",
+            "upstreamStatusCode": null, "providerErrorCode": "server_is_overloaded",
+            "message": "OpenAI upstream failure: kind=upstream_capacity_unavailable, status=503",
+            "metadata": {"source": "ops_event"}
+        });
+        let log = parse_request_log(&event).unwrap();
+        assert_eq!(log.key, "ops_event:evt-9");
+        assert_eq!(log.request_id.as_deref(), Some("req-2"));
+        assert_eq!(log.codes, vec![503]);
+    }
+
+    #[test]
+    fn plugin_requests_and_legacy_usage_fields_are_recognized() {
+        let own = json!({"id":"r","accountId":"a","upstreamStatusCode":503,
+            "requestKind":"plugin_bound_model","subagentKind":"instance-1"});
+        assert_eq!(
+            parse_request_log(&own).unwrap().plugin_instance.as_deref(),
+            Some("instance-1")
+        );
+        let legacy = json!({"request_id":"r","account":{"id":"a","name":"n"},"errorCode":"503"});
+        let log = parse_request_log(&legacy).unwrap();
+        assert_eq!(
+            (log.account_id.as_deref(), log.codes),
+            (Some("a"), vec![503])
+        );
+        // A provider error code string is not an HTTP status.
+        let text = json!({"id":"r","errorCode":"server_is_overloaded"});
+        assert!(parse_request_log(&text).unwrap().codes.is_empty());
+        assert!(parse_request_log(&json!({"accountId":"a"})).is_none());
+    }
 
     #[test]
     fn model_request_pins_account_for_proxy_routing() {

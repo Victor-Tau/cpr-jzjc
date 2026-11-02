@@ -1,0 +1,54 @@
+/* Shared design primitives for every plugin page. Colours always come from
+   the host theme tokens so light/dark switching needs no page-specific CSS. */
+:root{font-family:var(--z-font-family,system-ui,sans-serif);color:var(--z-color-text,#0e1726);font-size:13px;line-height:1.5;background:transparent}
+*{box-sizing:border-box}
+body{margin:0;min-width:0;background:transparent}
+h1,h2,h3,h4,p,dl,dd{margin:0}
+p{color:var(--z-color-text-secondary,#414b5a)}
+button,input,textarea,select{font:inherit}
+.tabular{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--z-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace)}
+.muted{color:var(--z-color-text-tertiary,#535b67)}
+
+/* Panel: one card per topic. */
+.panel{background:var(--z-card-bg,#fff);border:1px solid var(--z-color-border,#d8e0ea);border-radius:var(--z-border-radius-lg,12px);box-shadow:var(--z-card-shadow,none);padding:20px;min-width:0}
+.panel+.panel{margin-top:16px}
+.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px 16px;flex-wrap:wrap;margin-bottom:18px}
+.panel-head:last-child{margin-bottom:0}
+.panel-title{display:flex;align-items:flex-start;gap:12px;min-width:0;flex:1 1 260px}
+.panel-icon{display:grid;place-items:center;flex:none;width:32px;height:32px;border-radius:var(--z-border-radius,8px);background:var(--z-color-primary-container,#f0f4fe);color:var(--z-color-primary-on-container,#4261b5)}
+.panel-title h2,.panel-title h3{font-size:15px;font-weight:600;line-height:1.45;color:var(--z-color-text,#0e1726)}
+.panel-title p{margin-top:2px;font-size:12px;line-height:1.6;color:var(--z-color-text-secondary,#414b5a)}
+.panel-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* Form field: label, control, optional help text. */
+.field{display:flex;flex-direction:column;gap:6px;min-width:0;font-size:13px}
+.field-label{font-weight:500;color:var(--z-color-text,#0e1726)}
+.help{font-size:12px;line-height:1.6;color:var(--z-color-text-tertiary,#535b67)}
+
+/* Pill: compact status badge; add .dot for a leading status dot. */
+.pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:600;line-height:1;white-space:nowrap;background:var(--z-color-fill-tertiary,#f1f5f9);color:var(--z-color-text-secondary,#414b5a)}
+.pill.dot::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.pill.tone-success{background:var(--z-color-success-container,#ecf9f5);color:var(--z-color-success-on-container,#0c7653)}
+.pill.tone-danger{background:var(--z-color-error-container,#fef0f0);color:var(--z-color-error-on-container,#b33333)}
+.pill.tone-warning{background:var(--z-color-warning-container,#fef7eb);color:var(--z-color-warning-on-container,#915d06)}
+.pill.tone-info{background:var(--z-color-info-container,#f2f5fe);color:var(--z-color-info-text,#356acc)}
+.pill.tone-primary{background:var(--z-color-primary-container,#f0f4fe);color:var(--z-color-primary-on-container,#4261b5)}
+.pill.tone-neutral{background:var(--z-color-fill-tertiary,#f1f5f9);color:var(--z-color-text-secondary,#414b5a)}
+
+/* Text tones for inline emphasis. */
+.text-success{color:var(--z-color-success-text,#1f8760)}
+.text-danger{color:var(--z-color-error-text,#c54141)}
+.text-warning{color:var(--z-color-warning-text,#ad6800)}
+.text-info{color:var(--z-color-info-text,#356acc)}
+
+/* Notice bar: page-level messages. */
+.notice{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:var(--z-border-radius,8px);font-size:13px;line-height:1.6;overflow-wrap:anywhere;background:var(--z-color-fill-tertiary,#f1f5f9);color:var(--z-color-text-secondary,#414b5a)}
+.notice>svg{flex:none;margin-top:3px}
+.notice>span{flex:1;min-width:0}
+.notice.tone-success{background:var(--z-color-success-container,#ecf9f5);color:var(--z-color-success-on-container,#0c7653)}
+.notice.tone-danger{background:var(--z-color-error-container,#fef0f0);color:var(--z-color-error-on-container,#b33333)}
+.notice.tone-warning{background:var(--z-color-warning-container,#fef7eb);color:var(--z-color-warning-on-container,#915d06)}
+.notice.tone-info{background:var(--z-color-info-container,#f2f5fe);color:var(--z-color-info-text,#356acc)}
+
+@media(max-width:600px){.panel{padding:16px}}

@@ -55,6 +55,9 @@ pub struct Config {
     /// Request-log error codes that should enqueue an immediate detection.
     #[serde(default)]
     pub trigger_error_codes: Vec<u16>,
+    /// Minimum minutes between two log-triggered checks of one account.
+    #[serde(default = "default_trigger_cooldown")]
+    pub trigger_cooldown_minutes: u32,
     pub aliases: BTreeMap<String, String>,
     pub low_confidence_percent: f64,
     pub degraded_percent: f64,
@@ -75,6 +78,9 @@ pub struct Config {
 fn default_max_concurrency() -> u32 {
     4
 }
+fn default_trigger_cooldown() -> u32 {
+    30
+}
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -86,6 +92,7 @@ impl Default for Config {
             timeout_seconds: 120,
             degraded_models: vec!["gpt-5.6-luna".into()],
             trigger_error_codes: vec![],
+            trigger_cooldown_minutes: default_trigger_cooldown(),
             aliases: BTreeMap::new(),
             low_confidence_percent: 20.0,
             degraded_percent: 90.0,
@@ -163,6 +170,9 @@ impl Config {
                 .any(|code| !(100..=599).contains(code))
         {
             return Err("请求日志触发错误码须为100至599，最多32项".into());
+        }
+        if self.trigger_cooldown_minutes > 1440 {
+            return Err("日志触发冷却时间须为0至1440分钟".into());
         }
         let mut referenced = self.degraded_models.clone();
         referenced.extend(self.aliases.values().cloned());
@@ -421,6 +431,17 @@ pub struct Job {
     pub group_state: String,
     #[serde(default)]
     pub group_error: Option<String>,
+    /// Request-log entry that enqueued this job (source `error_code`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerSource>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerSource {
+    pub code: u16,
+    pub request_id: Option<String>,
+    pub message: Option<String>,
+    pub observed_at: u64,
 }
 fn no_action() -> String {
     "none".into()
@@ -543,6 +564,21 @@ mod tests {
         assert!(cfg.validate(&models).is_err());
         cfg.trigger_error_codes = vec![600];
         assert!(cfg.validate(&models).is_err());
+        cfg.trigger_error_codes = vec![503];
+        cfg.trigger_cooldown_minutes = 1441;
+        assert!(cfg.validate(&models).is_err());
+        cfg.trigger_cooldown_minutes = 0;
+        assert!(cfg.validate(&models).is_ok());
+    }
+    #[test]
+    fn configs_saved_before_trigger_cooldown_get_default() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("triggerCooldownMinutes");
+        let cfg: Config = serde_json::from_value(value).unwrap();
+        assert_eq!(cfg.trigger_cooldown_minutes, 30);
     }
     #[test]
     fn v14_defaults_and_legacy_records() {
