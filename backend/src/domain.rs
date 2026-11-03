@@ -3,8 +3,10 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// 检测历史只保留最近三天，数量不设固定上限。
+/// 旧版按天保留的固定值，仅为兼容旧配置与导入文件而保留，不再参与清理。
 pub const HISTORY_RETENTION_DAYS: u32 = 3;
+/// 每个账户默认保留的最近检测记录数。
+pub const DEFAULT_RETENTION_PER_ACCOUNT: u32 = 10;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
@@ -67,7 +69,11 @@ pub struct Config {
     pub auto_disable: bool,
     pub auto_move_group: bool,
     pub target_group_id: String,
+    /// Legacy (<1.15) field, kept so old configs and exports still parse.
     pub retention_days: u32,
+    /// Number of most recent detection records kept for each account.
+    #[serde(default = "default_retention_per_account")]
+    pub retention_per_account: u32,
     pub schedule: Schedule,
     pub auto_check_updates: bool,
     pub update_interval_hours: u32,
@@ -77,6 +83,9 @@ pub struct Config {
 }
 fn default_max_concurrency() -> u32 {
     4
+}
+fn default_retention_per_account() -> u32 {
+    DEFAULT_RETENTION_PER_ACCOUNT
 }
 fn default_trigger_cooldown() -> u32 {
     30
@@ -103,6 +112,7 @@ impl Default for Config {
             auto_move_group: false,
             target_group_id: String::new(),
             retention_days: HISTORY_RETENTION_DAYS,
+            retention_per_account: DEFAULT_RETENTION_PER_ACCOUNT,
             schedule: Schedule::default(),
             auto_check_updates: false,
             update_interval_hours: 24,
@@ -153,6 +163,9 @@ impl Config {
             || self.retry_delay_seconds > 3600
         {
             return Err("确认轮数须为1至5，低置信度复测预算0至5，等待至多3600秒".into());
+        }
+        if !(1..=100).contains(&self.retention_per_account) {
+            return Err("每个账户保留的检测记录数须为1至100".into());
         }
         if !(1..=16).contains(&self.max_concurrency) {
             return Err("并行检测数须为1至16".into());
@@ -588,6 +601,10 @@ mod tests {
         assert_eq!(j.config.low_confidence_retries, 1);
         assert_eq!(j.config.retry_delay_seconds, 10);
         assert_eq!(j.config.retention_days, HISTORY_RETENTION_DAYS);
+        assert_eq!(
+            j.config.retention_per_account,
+            DEFAULT_RETENTION_PER_ACCOUNT
+        );
         assert!(!j.config.auto_move_group);
         assert_eq!(j.classify(&score("gpt-5.6-luna", 0.199)), "low_confidence");
         assert_eq!(j.classify(&score("gpt-5.6-luna", 0.20)), "inconclusive");

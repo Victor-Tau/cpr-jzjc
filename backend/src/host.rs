@@ -901,7 +901,7 @@ mod tests {
 
     #[test]
     fn cpr_error_log_entry_matches_status_and_account() {
-        // Shape of /api/admin/operations/errors items in CPR 3.38.1.
+        // Shape of /api/admin/operations/errors items in CPR 3.39.1.
         let item = json!({
             "id": "req-1", "requestId": "req-1", "kind": "model_request",
             "accountId": "acct-7", "accountName": "worker", "accountEmail": "w@example.com",

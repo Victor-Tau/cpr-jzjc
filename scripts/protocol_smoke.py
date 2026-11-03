@@ -274,7 +274,7 @@ class Integration(unittest.TestCase):
 
     def test_defaults_and_saved_v13_config_survive_upgrade(self):
         fresh=self.host.request('api/bootstrap')['config']
-        self.assertEqual([fresh[k] for k in ['lowConfidencePercent','degradedPercent','confirmationRounds','lowConfidenceRetries','retryDelaySeconds','retentionDays']],[20,90,1,1,10,3])
+        self.assertEqual([fresh[k] for k in ['lowConfidencePercent','degradedPercent','confirmationRounds','lowConfidenceRetries','retryDelaySeconds','retentionDays','retentionPerAccount']],[20,90,1,1,10,3,10])
         saved=self.config(lowConfidencePercent=60,degradedPercent=80,confirmationRounds=3,lowConfidenceRetries=2,retryDelaySeconds=30,timeoutSeconds=999)
         self.host.close();state=copy.deepcopy(self.host.state)
         for key in ['autoMoveGroup','targetGroupId']:state[('control','main')]['value']['config'].pop(key)
@@ -671,7 +671,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.host.request('api/delete',{'id':active}),{'ok':True,'deleted':1,'skipped':0})
         self.assertNotIn(('jobs',active),self.host.state)
         self.assertNotIn(active,self.host.request('api/bootstrap')['jobs'])
-    def test_history_keeps_three_days_without_count_limit(self):
+    def test_history_keeps_latest_records_per_account(self):
         self.config(lowConfidencePercent=0,degradedPercent=100)
         identity=self.submit();self.host.tick()
         self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed')
@@ -681,16 +681,17 @@ class Integration(unittest.TestCase):
         now_ms=int(time.time()*1000);ids=[]
         for i in range(500):
             job_id=f'j-history-{i:04d}';job=copy.deepcopy(template)
-            job.update(id=job_id,status='completed',verdict='no_match',message='历史记录',createdAt=now_ms-1000,finishedAt=now_ms-500)
+            job.update(id=job_id,status='completed',verdict='no_match',message='历史记录',createdAt=now_ms-100000+i,finishedAt=now_ms-50000+i)
             state[('jobs',job_id)]={'value':job,'version':1,'schema_version':1};ids.append(job_id)
         state[('control','main')]['value']['jobIds'].extend(ids)
-        old=ids[0];state[('jobs',old)]['value']['finishedAt']=now_ms-4*86400000
+        old=ids[0];newest=ids[-1]
         self.host=Host(state=state);self.addCleanup(self.host.close)
         self.assertEqual(len(self.host.request('api/bootstrap')['jobs']),501)
         submitted=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'after-500-history'})['submitted'][0]
-        self.assertNotIn(('jobs',old),self.host.state)
+        # Default keeps the latest 10 per account: the original job plus 9 newest history records, then the new one.
+        self.assertNotIn(('jobs',old),self.host.state);self.assertIn(('jobs',newest),self.host.state)
         self.host.request('api/report?id='+old,ok=False)
-        jobs=self.host.request('api/jobs')['jobs'];self.assertIn(submitted,[j['id'] for j in jobs]);self.assertEqual(len(jobs),501)
+        jobs=self.host.request('api/jobs')['jobs'];self.assertIn(submitted,[j['id'] for j in jobs]);self.assertEqual(len(jobs),11)
 
     def test_large_history_management_responses_stay_within_host_limit(self):
         self.config(lowConfidencePercent=0,degradedPercent=100)
@@ -700,7 +701,7 @@ class Integration(unittest.TestCase):
         now_ms=int(time.time()*1000);ids=[]
         for i in range(1200):
             job_id=f'large-history-{i:04d}';job=copy.deepcopy(template)
-            job.update(id=job_id,message='历史检测结果与错误详情'*60,createdAt=now_ms-1000,finishedAt=now_ms-500)
+            job.update(id=job_id,message='历史检测结果与错误详情'*60,createdAt=now_ms-100000+i,finishedAt=now_ms-50000+i)
             state[('jobs',job_id)]={'value':job,'version':1,'schema_version':1};ids.append(job_id)
         state[('control','main')]['value']['jobIds']=[identity,*ids]
         self.host=Host(state=state);self.addCleanup(self.host.close)

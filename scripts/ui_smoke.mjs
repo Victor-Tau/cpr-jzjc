@@ -236,7 +236,7 @@ try {
   for(const [label,value] of [['低置信度复测阈值（%）','20'],['降智判定阈值（%）','90'],['连续确认轮数','1'],['低置信度额外复测次数','1'],['复测与失败重试间隔（秒）','10']]) {
     assert.equal(await page.getByRole('spinbutton',{name:new RegExp('^'+label.replace(/[()%]/g,'\\$&'))}).inputValue(),value)
   }
-  await page.getByText('自动保存最近3天',{exact:false}).waitFor()
+  await page.getByText('每账号保留检测记录数',{exact:false}).waitFor()
   await page.getByLabel('确认降智后自动关闭该账户调度',{exact:true}).locator('..').click()
   await page.getByLabel('确认降智后移入指定分组',{exact:true}).locator('..').click()
   await page.getByLabel('降智目标分组',{exact:true}).click()

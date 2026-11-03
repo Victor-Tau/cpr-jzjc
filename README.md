@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/Victor-Tau/cpr-jzjc)](https://github.com/Victor-Tau/cpr-jzjc/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CPR: 3.38.1](https://img.shields.io/badge/CPR-3.38.1-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs)
+[![CPR: 3.39.1](https://img.shields.io/badge/CPR-3.39.1-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs)
 
 在 **Codex Proxy RS（CPR）** 管理页面中，批量检测账户的模型输出、查看指纹匹配结果，并按自定义规则执行复测、定时检查和账户处理。
 
@@ -18,6 +18,7 @@
 | 自动复测 | 配置置信度阈值、降级模型名单和连续确认轮数，低置信度结果可自动复测 |
 | 定时检查 | 按固定间隔或指定时区的每日时刻执行，支持动态筛选范围和固定账户列表 |
 | 请求日志触发 | 配置 503 等错误码，从 CPR 运维错误日志匹配上游或客户端状态及诊断信息中的状态码，自动为对应账户排队检测；排除插件自身请求，按冷却时间限制重复触发 |
+| 历史保留 | 按账户保留最近 N 条检测记录（默认 10，可设 1–100） |
 | 检测报告 | 查看每轮候选模型概率、家族概率、请求记录、配置快照与指纹库版本 |
 | 确认后处理 | 可分别开启关闭账户调度、移入指定分组；操作失败可单独重试 |
 | 指纹库更新 | 检查并应用上游指纹库，支持回退上一版本和恢复内置库 |
@@ -42,8 +43,8 @@
 
 | 项目 | 当前发布版本要求 |
 | --- | --- |
-| 插件版本 | **1.14.0** |
-| CPR 宿主 | **>=3.38.1、<3.39.0** |
+| 插件版本 | **1.15.0** |
+| CPR 宿主 | **>=3.39.1、<3.40.0** |
 | 平台 | **Linux x86_64，glibc 2.36+** |
 | 运行模式 | `trustedProcess` |
 | 评分运行时 | 已包含私有 Python/NumPy，无需另装系统 Python 或部署 ModelTrace 服务 |
@@ -52,7 +53,7 @@
 
 ### 首次安装
 
-1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载 `personal.modeltrace-health-1.14.0-x86_64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
+1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载 `personal.modeltrace-health-1.15.0-x86_64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
 2. 在 CPR 中打开「插件管理 → 安装插件 → 上传包」，上传下载的安装包并启用。
 3. 打开「账号降智检测 → 参数配置」，选择已有计量 Key，确认请求模型及判定规则，点击「保存全部参数」。
 4. 回到「账户检测」，先选择一个账户执行检测，在报告中查看结果，再按需启用批量检测或定时检查。
@@ -66,6 +67,8 @@
 ### 更新现有实例
 
 在宿主插件管理中上传新版本包，更新并切换**现有插件实例**。同实例升级保留配置、计划、检测历史和指纹库；升级前也可在「参数配置 → 配置备份」导出配置。
+
+[1.15.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.15.0) 适配 CPR 3.39.1，历史改为按账户保留最近 N 条检测记录（默认 10）。
 
 [1.14.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.14.0) 修复 CPR 3.38.1 下请求日志错误码未触发检测的问题，新增触发冷却，并改进账户页、报告和参数配置界面；宿主范围与 1.13.0 相同。详细变更见 [CHANGELOG](CHANGELOG.md)。
 

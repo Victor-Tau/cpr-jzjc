@@ -76,7 +76,7 @@ const dirty = computed(() => {
   return !mapping || snapshot(cfg.value, mapping) !== savedSnapshot.value
 })
 
-type NumberKey = 'maxOutputTokens' | 'timeoutSeconds' | 'maxConcurrency' | 'lowConfidencePercent' | 'degradedPercent' | 'confirmationRounds' | 'lowConfidenceRetries' | 'retryDelaySeconds' | 'triggerCooldownMinutes' | 'updateIntervalHours'
+type NumberKey = 'maxOutputTokens' | 'timeoutSeconds' | 'maxConcurrency' | 'lowConfidencePercent' | 'degradedPercent' | 'confirmationRounds' | 'lowConfidenceRetries' | 'retryDelaySeconds' | 'retentionPerAccount' | 'triggerCooldownMinutes' | 'updateIntervalHours'
 interface NumberField { key: NumberKey; label: string; min: number; max?: number; step?: number; help: string; detail?: string }
 const number = (event: Event, key: NumberKey) => { cfg.value[key] = Number((event.target as HTMLInputElement).value) }
 const requestNumbers: NumberField[] = [
@@ -91,6 +91,7 @@ const ruleNumbers: NumberField[] = [
   { key: 'degradedPercent', label: '降智判定阈值（%）', min: 0, max: 100, step: 0.1, help: '命中降级名单且概率达到此值即判定降智。' },
   { key: 'confirmationRounds', label: '连续确认轮数', min: 1, max: 5, help: '连续判定降智达到该轮数才确认（1–5）。' },
   { key: 'lowConfidenceRetries', label: '低置信度额外复测次数', min: 0, max: 5, help: '低置信度时最多追加的复测次数（0–5）。' },
+  { key: 'retentionPerAccount', label: '每账号保留检测记录数', min: 1, max: 100, help: '每个账户只保留最近 N 条检测记录（1–100），超出的旧记录在提交检测、保存参数和后台维护时清理。' },
   { key: 'retryDelaySeconds', label: '复测与失败重试间隔（秒）', min: 0, max: 3600, help: '两次复测或失败重试之间的等待（0–3600）。' },
 ]
 
@@ -142,7 +143,7 @@ const bankMeta = computed(() => [
 ])
 
 function useDefaults() {
-  Object.assign(cfg.value, { lowConfidencePercent: 20, degradedPercent: 90, confirmationRounds: 1, lowConfidenceRetries: 1, retryDelaySeconds: 10, retentionDays: 3, triggerErrorCodes: [], triggerCooldownMinutes: 30 })
+  Object.assign(cfg.value, { lowConfidencePercent: 20, degradedPercent: 90, confirmationRounds: 1, lowConfidenceRetries: 1, retryDelaySeconds: 10, retentionDays: 3, retentionPerAccount: 10, triggerErrorCodes: [], triggerCooldownMinutes: 30 })
   codesText.value = ''
   rulesNotice.value = '已填入 1.4 默认规则（并清空日志触发错误码、冷却恢复 30 分钟），保存后生效。'
 }
@@ -270,11 +271,6 @@ function save() {
           <label class="field-label" :for="id(f.key)">{{ f.label }}</label>
           <input :id="id(f.key)" class="control" type="number" :min="f.min" :max="f.max" :step="f.step" :value="cfg[f.key]" :aria-describedby="id(`${f.key}-help`)" @input="number($event, f.key)">
           <span :id="id(`${f.key}-help`)" class="help">{{ f.help }}</span>
-        </div>
-        <div class="field">
-          <span class="field-label">历史保留</span>
-          <div class="static-value"><Clock :size="14" />3 天</div>
-          <span class="help" title="不限制记录条数，仅受宿主存储预算约束。">自动保存最近3天，过期记录在提交检测和后台维护时清理，不限条数。</span>
         </div>
         <div class="field span-all">
           <label class="field-label" :for="id('aliases')">模型别名</label>

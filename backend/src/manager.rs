@@ -9,7 +9,7 @@ use gateway_plugin_sdk::{PluginFault, client::HostClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -182,7 +182,7 @@ impl Manager {
             self.control = Control::default();
             self.version = None;
         }
-        // 1.7.1 起历史固定保留最近三天；旧配置中的天数在载入时归一化。
+        // retentionDays 已废弃（1.15 起按账户保留最近 N 条），仅归一化旧字段。
         self.control.config.retention_days = HISTORY_RETENTION_DAYS;
         for id in self.control.job_ids.clone() {
             if let Some(r) = host::state_get(host, "jobs", &id).await? {
@@ -358,7 +358,9 @@ impl Manager {
         }
         self.control.config = config;
         self.control.config_revision += 1;
-        self.save(host).await
+        self.save(host).await?;
+        // 调小保留条数后立即生效。
+        self.prune(host).await
     }
     pub async fn submit(
         &mut self,
@@ -551,19 +553,33 @@ impl Manager {
         Ok(json!({"deleted":deleted.len(),"skipped":skipped}))
     }
     async fn prune(&mut self, host: &HostClient) -> Result<(), PluginFault> {
-        // 历史固定保留最近三天，不设条数上限；存储预算仍是宿主的最终约束。
-        let cutoff = now().saturating_sub(u64::from(HISTORY_RETENTION_DAYS) * 86400000);
+        // 每个账户只保留最近 N 条记录（活动任务计入条数但不会被删除）；
+        // 另有总容量上限，存储预算仍是宿主的最终约束。
+        let keep = self.control.config.retention_per_account.max(1) as usize;
+        let mut order: Vec<usize> = (0..self.jobs.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(self.jobs[i].0.created_at));
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut expired = BTreeSet::new();
+        for &i in &order {
+            let n = seen.entry(self.jobs[i].0.account_id.as_str()).or_insert(0);
+            *n += 1;
+            if *n > keep {
+                expired.insert(i);
+            }
+        }
         let mut bytes: usize = self
             .jobs
             .iter()
             .map(|(j, _)| serde_json::to_vec(j).unwrap().len())
             .sum();
         let mut removed = vec![];
-        for (j, _) in &self.jobs {
-            if !j.active()
-                && !j.actions_pending()
-                && (j.finished_at.unwrap_or(j.created_at) < cutoff || bytes > 12 * 1024 * 1024)
-            {
+        // Oldest first so the byte cap also drops the oldest records.
+        for &i in order.iter().rev() {
+            let j = &self.jobs[i].0;
+            if j.active() || j.actions_pending() {
+                continue;
+            }
+            if expired.contains(&i) || bytes > 12 * 1024 * 1024 {
                 bytes = bytes.saturating_sub(serde_json::to_vec(j).unwrap().len());
                 removed.push(j.id.clone());
             }
