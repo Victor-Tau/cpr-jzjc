@@ -286,7 +286,7 @@ impl Manager {
         json!({"active":self.active_bank(),"previous":self.control.previous_bank.as_ref().and_then(|h|self.control.banks.iter().find(|b|&b.hash==h)),"builtin":banks::builtin(),"update":self.control.update,"engineCommit":banks::engine_commit()})
     }
     pub fn summaries(&self) -> Vec<Value> {
-        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state,"triggerCode":j.trigger.as_ref().map(|t|t.code)})).collect()
+        self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptLimit":j.config.failure_retries.saturating_add(1),"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state,"triggerCode":j.trigger.as_ref().map(|t|t.code)})).collect()
     }
     async fn prepare_score(
         &mut self,
@@ -783,8 +783,8 @@ impl Manager {
         i: usize,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<(), PluginFault> {
-        if self.jobs[i].0.verdict != "degraded" {
-            return Err(fault("只有已确认降智的任务可执行停用"));
+        if !self.jobs[i].0.can_disable() {
+            return Err(fault("任务未满足已配置的关闭调度条件"));
         }
         self.jobs[i].0.disable_state = "attempting".into();
         self.jobs[i].0.disable_error = None;
@@ -1566,8 +1566,11 @@ impl Manager {
         {
             let outcome = j.pending_outcome.as_mut().unwrap();
             outcome.text = None;
-            outcome.error = Some("模型回答超过可持久化样本上限，请减少输出长度".into());
+            outcome.error =
+                Some("模型回答或任务记录超过可持久化样本上限，请减少输出长度或重试次数".into());
             outcome.permanent = true;
+            // 本地存储上限不属于请求拒绝，不能继续重试或触发账户停用。
+            outcome.diagnostics.kind = "persistence_limit".into();
         }
         self.progress.phase(&j.id, "waiting_validation", json!({}));
         self.save_probe_job(host, i).await
@@ -1628,21 +1631,9 @@ impl Manager {
         } else {
             (None, outcome.error)
         };
-        let full_window_ms = self.request_window.as_millis().saturating_sub(500);
-        let full_budget_timeout = |d: &ProbeDiagnostics| {
-            d.kind == "host_budget_timeout"
-                && d.full_window.unwrap_or_else(|| {
-                    d.budget_ms
-                        .is_some_and(|ms| u128::from(ms) >= full_window_ms)
-                })
-        };
         let j = &mut self.jobs[i].0;
-        let repeated_budget_timeout = full_budget_timeout(&outcome.diagnostics)
-            && j.attempts
-                .last()
-                .filter(|a| a.error.is_some())
-                .and_then(|a| a.diagnostics.as_ref())
-                .is_some_and(full_budget_timeout);
+        // 请求拒绝也遵循用户配置的重试预算；本地无法持久化的回答仍直接终止。
+        let permanent = outcome.permanent && outcome.diagnostics.kind != "request_rejected";
         j.pending_probe = false;
         j.pending_outcome = None;
         j.attempts.push(Attempt {
@@ -1669,23 +1660,32 @@ impl Manager {
             }
             .into();
             sampled = true;
-        } else if outcome.permanent || repeated_budget_timeout || j.round_attempts >= 5 {
+        } else if permanent || j.round_attempts > j.config.failure_retries {
             j.finish(
                 "failed",
                 "inconclusive",
-                if repeated_budget_timeout {
-                    format!(
-                        "{}；连续两次超出宿主调用预算，已停止重复请求",
-                        error.unwrap_or_default()
-                    )
-                } else {
-                    error.unwrap_or_else(|| "采样失败".into())
-                },
+                error.unwrap_or_else(|| "采样失败".into()),
                 now(),
             );
+            if j.can_disable() {
+                j.disable_state = "pending".into();
+                j.action_message();
+            } else if j
+                .attempts
+                .last()
+                .and_then(|a| a.diagnostics.as_ref())
+                .is_some_and(|d| d.kind == "request_rejected")
+            {
+                j.message.push_str("；保留账户调度，等待下次自动检测");
+            }
             sampled = false;
         } else {
-            j.message = format!("{}；等待重试", error.unwrap_or_default());
+            j.message = format!(
+                "{}；等待重试（{}/{}）",
+                error.unwrap_or_default(),
+                j.round_attempts,
+                j.config.failure_retries
+            );
             j.next_at = now() + u64::from(j.config.retry_delay_seconds) * 1000;
             self.progress
                 .phase(&j.id, "waiting_retry", json!({"nextAt":j.next_at}));

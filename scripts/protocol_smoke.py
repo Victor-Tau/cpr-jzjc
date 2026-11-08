@@ -291,7 +291,7 @@ class Integration(unittest.TestCase):
         preview=self.host.request('api/config/preview',{'config':old})['config']
         self.assertEqual(preview['confirmationRounds'],3);self.assertFalse(preview['autoMoveGroup'])
         after=self.host.request('api/bootstrap');self.assertEqual(before['config'],after['config']);self.assertEqual(before['configRevision'],after['configRevision'])
-        for bad in [{'degradedPercent':101},{'unknownField':True},{'confirmationRounds':0},{'autoMoveGroup':True}]:
+        for bad in [{'degradedPercent':101},{'unknownField':True},{'confirmationRounds':0},{'autoMoveGroup':True},{'failureRetries':100},{'failureRetries':-1},{'failureRetries':1.5},{'requestRejectedAction':'unknown'}]:
             cfg=copy.deepcopy(before['config']);cfg.update(bad)
             self.host.request('api/config/preview',{'config':cfg},ok=False)
         self.assertEqual(self.host.request('api/bootstrap')['config'],before['config'])
@@ -397,8 +397,8 @@ class Integration(unittest.TestCase):
         if report['status']=='running':self.host.tick()
         self.assertEqual(self.host.request('api/report?id='+identity)['status'],'completed');self.assertEqual(len(self.host.executions),1)
 
-    def test_repeated_host_budget_timeouts_stop_with_diagnostics(self):
-        self.config();identity=self.submit();original=self.host.callback;seen=set()
+    def test_host_budget_timeouts_use_configured_retries_with_diagnostics(self):
+        self.config(failureRetries=1);identity=self.submit();original=self.host.callback;seen=set()
         def callback(method,p,body):
             if method=='host.model.stream_read' and len(self.host.executions) not in seen:
                 seen.add(len(self.host.executions));self.host.model_read_delay=20
@@ -412,7 +412,7 @@ class Integration(unittest.TestCase):
             self.host.model_read_delay=0;self.host.tick(budget_ms=10000)
             if self.host.request('api/report?id='+identity)['status']=='failed':break
         report=self.host.request('api/report?id='+identity)
-        self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),2);self.assertIn('连续两次',report['message'])
+        self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),2);self.assertIn('部分结果未通过样本校验',report['message'])
         for attempt in report['attempts']:
             self.assertEqual(attempt['diagnostics']['kind'],'host_budget_timeout');self.assertGreater(attempt['diagnostics']['receivedBytes'],0)
             self.assertGreater(attempt['diagnostics']['budgetMs'],8800);self.assertLessEqual(attempt['diagnostics']['budgetMs'],9400)
@@ -892,7 +892,7 @@ class Integration(unittest.TestCase):
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(len(report['rounds']),3);self.assertEqual(report['verdict'],'inconclusive');self.assertEqual(len(self.host.executions),3);self.assertEqual(self.host.disable_calls,0)
     def test_auth_error_does_not_disable_or_leak(self):
-        self.config(autoDisable=True);self.host.fail_model=True;identity=self.submit();self.host.tick(3)
+        self.config(autoDisable=True,failureRetries=0);self.host.fail_model=True;identity=self.submit();self.host.tick(3)
         report=self.host.request('api/report?id='+identity);self.assertEqual(report['status'],'failed');self.assertEqual(len(self.host.executions),1);self.assertNotIn('secret',json.dumps(report));self.assertEqual(self.host.disable_calls,0)
     def test_cancel_and_restart(self):
         self.config(lowConfidencePercent=100,degradedPercent=100);identity=self.submit();self.host.tick();self.host.request('api/cancel',{'id':identity});self.host.tick(2);self.assertEqual(len(self.host.executions),1)
@@ -1301,19 +1301,22 @@ class Integration(unittest.TestCase):
         self.assertTrue(all(r['status']=='running' and not r['pendingProbe'] for r in reports))
         self.assertTrue(all(len(r['attempts'])==1 for r in reports));self.assertEqual(len(self.host.executions),16)
 
-    def test_full_sixteen_way_timeouts_stop_after_two_waves(self):
+    def test_full_sixteen_way_timeouts_use_configured_retry_limit(self):
         self.host.additional_accounts=[{'id':f'acct-timeout-{i}','name':str(i),'provider':'openai','enabled':True,'status':'normal','groups':[]} for i in range(15)]
-        self.config(maxConcurrency=16)
+        self.config(maxConcurrency=16,failureRetries=2)
         ids=self.host.request('api/submit',{'accountIds':['acct-test',*[a['id'] for a in self.host.additional_accounts]],'requestId':'full-wave-timeout'})['submitted']
         self.host.model_response_delay=10
         self.host.tick(2,budget_ms=8000)
         reports=[self.host.request('api/report?id='+identity) for identity in ids]
-        self.assertTrue(all(r['status']=='failed' and len(r['attempts'])==2 for r in reports))
+        self.assertTrue(all(r['status']=='running' and len(r['attempts'])==2 for r in reports))
+        self.host.tick(budget_ms=8000)
+        reports=[self.host.request('api/report?id='+identity) for identity in ids]
+        self.assertTrue(all(r['status']=='failed' and len(r['attempts'])==3 for r in reports))
         for r in reports:
-            self.assertIn('连续两次',r['message'])
+            self.assertIn('宿主调用预算超时',r['message'])
             self.assertTrue(all(a['diagnostics']['fullWindow'] for a in r['attempts']))
             self.assertTrue(all(a['diagnostics']['budgetMs']<6500 for a in r['attempts']))
-        self.assertEqual(len(self.host.executions),32)
+        self.assertEqual(len(self.host.executions),48)
 
     def test_later_wave_defers_without_spending_attempt(self):
         self.host.additional_accounts=[{'id':'acct-later','name':'later','provider':'openai','enabled':True,'status':'normal','groups':[]}]
@@ -1357,8 +1360,8 @@ class Integration(unittest.TestCase):
         self.assertEqual(len(self.host.executions),1);self.assertEqual(len(report['attempts']),1)
         self.assertNotIn('pendingOutcome',report);self.assertEqual(self.host.disable_calls,0)
 
-    def test_revoked_token_is_actionable_and_never_retried(self):
-        self.config(autoDisable=True);identity=self.submit();original=self.host.callback;self.host.fail_model=True
+    def test_revoked_token_is_actionable_with_zero_retries(self):
+        self.config(autoDisable=True,failureRetries=0);identity=self.submit();original=self.host.callback;self.host.fail_model=True
         def callback(method,p,body):
             try:return original(method,p,body)
             except SimulatedFault:
@@ -1369,6 +1372,96 @@ class Integration(unittest.TestCase):
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(report['status'],'failed');self.assertIn('刷新凭据或重新授权',report['message'])
         self.assertEqual(len(self.host.executions),1);self.assertEqual(self.host.disable_calls,0)
+
+    def test_rejected_request_retry_counts_include_zero_and_ninety_nine(self):
+        for retries in [0,2,99]:
+            with self.subTest(retries=retries):
+                self.config(failureRetries=retries)
+                identity=self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':f'retry-{retries}'})['submitted'][0]
+                self.host.fail_model=True;before=len(self.host.executions)
+                self.host.tick(retries+1)
+                report=self.host.request('api/report?id='+identity)
+                self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),retries+1)
+                self.assertEqual(len(self.host.executions)-before,retries+1)
+                self.assertEqual(report['disableState'],'none');self.assertTrue(self.host.enabled)
+                self.assertNotIn('secret',json.dumps(report))
+                self.host.tick();self.assertEqual(len(self.host.executions)-before,retries+1)
+
+    def test_rejected_request_disables_after_retries_and_action_retry_does_not_probe(self):
+        self.config(failureRetries=1,requestRejectedAction='disable',autoDisable=False,autoMoveGroup=True,targetGroupId='group-degraded')
+        identity=self.submit();self.host.fail_model=True;self.host.fail_disable=True
+        self.host.tick();self.assertTrue(self.host.enabled);self.assertEqual(self.host.disable_calls,0)
+        self.host.tick();report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'failed');self.assertEqual(report['verdict'],'inconclusive')
+        self.assertEqual(report['disableState'],'failed');self.assertNotIn('已确认降智',report['message'])
+        self.assertEqual(self.host.move_calls,0);self.assertEqual(len(self.host.executions),2)
+        self.config(requestRejectedAction='continue',failureRetries=99)
+        self.host.fail_disable=False
+        self.host.request('api/retry-disable',{'id':identity})
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['disableState'],'disabled');self.assertFalse(self.host.enabled)
+        self.assertIn('已关闭账户调度',report['message']);self.assertNotIn('已确认降智',report['message'])
+        self.assertEqual(len(self.host.executions),2);self.assertEqual(self.host.move_calls,0)
+
+    def test_rejected_request_disable_checks_identity(self):
+        self.config(failureRetries=0,requestRejectedAction='disable')
+        identity=self.submit();original=self.host.callback;self.host.fail_model=True
+        def callback(method,p,body):
+            if method=='host.model.execute_stream':self.host.identity='replacement'
+            return original(method,p,body)
+        self.host.callback=callback;self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['disableState'],'failed');self.assertIn('身份已变化',report['disableError'])
+        self.assertEqual(self.host.disable_calls,0);self.assertTrue(self.host.enabled)
+
+    def test_rejected_request_continue_remains_eligible_for_next_schedule(self):
+        config=self.config(failureRetries=0,requestRejectedAction='continue',lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();self.host.fail_model=True;self.host.tick()
+        self.assertEqual(self.host.request('api/report?id='+identity)['status'],'failed')
+        config['schedule'].update(enabled=True,scope='ids',accountIds=['acct-test'])
+        self.config(**config)
+        self.host.close();state=self.host.state;state[('control','main')]['value']['nextDue']=1
+        self.host=Host(state=state);self.addCleanup(self.host.close);self.host.tick(2)
+        jobs=self.host.request('api/jobs')['jobs'];scheduled=[j for j in jobs if j['source']=='schedule']
+        self.assertEqual(len(scheduled),1);self.assertEqual(scheduled[0]['status'],'completed')
+        self.assertEqual(self.host.disable_calls,0);self.assertEqual(len(self.host.executions),1)
+
+    def test_failure_retry_snapshot_survives_restart_and_success(self):
+        self.config(failureRetries=2,requestRejectedAction='continue',lowConfidencePercent=0,degradedPercent=100)
+        identity=self.submit();self.host.fail_model=True;self.host.tick()
+        self.config(failureRetries=0,requestRejectedAction='disable')
+        self.host.close();self.host=Host(state=self.host.state);self.addCleanup(self.host.close)
+        self.host.fail_model=True;self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'running');self.assertEqual(len(report['attempts']),2)
+        self.assertEqual(self.host.request('api/jobs')['jobs'][0]['attemptLimit'],3)
+        self.host.fail_model=False;self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'completed');self.assertEqual(len(report['attempts']),3)
+        self.assertEqual(self.host.disable_calls,0)
+
+    def test_transient_failure_with_zero_retries_does_not_disable(self):
+        self.config(failureRetries=0,requestRejectedAction='disable');identity=self.submit();original=self.host.callback
+        def callback(method,p,body):
+            result=original(method,p,body)
+            if method=='host.model.execute_stream':raise SimulatedFault('upstream temporarily unavailable status=503')
+            return result
+        self.host.callback=callback;self.host.tick(2)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'failed');self.assertEqual(len(report['attempts']),1)
+        self.assertEqual(self.host.disable_calls,0);self.assertTrue(self.host.enabled)
+
+    def test_retry_history_storage_limit_stops_without_disabling(self):
+        self.config(failureRetries=99,requestRejectedAction='disable')
+        identity=self.submit();self.host.fail_model=True;self.host.tick()
+        self.host.close();state=copy.deepcopy(self.host.state)
+        job=state[('jobs',identity)]['value'];attempt=job['attempts'][0]
+        while len(raw(job)) < 241000:job['attempts'].append(copy.deepcopy(attempt))
+        self.host=Host(state=state);self.addCleanup(self.host.close);self.host.fail_model=True;self.host.tick(2)
+        report=self.host.request('api/report?id='+identity)
+        self.assertEqual(report['status'],'failed');self.assertIn('任务记录超过',report['message'])
+        self.assertEqual(report['attempts'][-1]['diagnostics']['kind'],'persistence_limit')
+        self.assertEqual(self.host.disable_calls,0);self.assertEqual(len(self.host.executions),1)
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,default=BINARY);parser.add_argument('--deny-timestamps',action='store_true',help='Use strace to deny utimensat and exercise restricted runtime extraction');parser.add_argument('--runtime-tmpdir',type=Path,help='Set TMPDIR for the plugin process to exercise runtime directory fallback');args,remaining=parser.parse_known_args();BINARY=args.binary;DENY_TIMESTAMPS=args.deny_timestamps;RUNTIME_TMPDIR=args.runtime_tmpdir

@@ -77,6 +77,8 @@ def main():
                     equivalent(value, after["config"][key])
             for key in ["configRevision", "nextDue"]:
                 assert after[key] == before[key], key
+            assert after["config"]["failureRetries"] == 4
+            assert after["config"]["requestRejectedAction"] == "continue"
             assert not after["config"]["autoMoveGroup"]
             assert after["config"]["targetGroupId"] == ""
             assert restored["groupState"] == "none"

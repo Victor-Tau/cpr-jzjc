@@ -45,6 +45,13 @@ impl Default for Schedule {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestRejectedAction {
+    Continue,
+    Disable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Config {
     pub request_model: String,
@@ -65,6 +72,8 @@ pub struct Config {
     pub degraded_percent: f64,
     pub confirmation_rounds: u32,
     pub low_confidence_retries: u32,
+    pub failure_retries: u32,
+    pub request_rejected_action: RequestRejectedAction,
     pub retry_delay_seconds: u32,
     pub auto_disable: bool,
     pub auto_move_group: bool,
@@ -107,6 +116,8 @@ impl Default for Config {
             degraded_percent: 90.0,
             confirmation_rounds: 1,
             low_confidence_retries: 1,
+            failure_retries: 4,
+            request_rejected_action: RequestRejectedAction::Continue,
             retry_delay_seconds: 10,
             auto_disable: false,
             auto_move_group: false,
@@ -166,6 +177,9 @@ impl Config {
         }
         if !(1..=100).contains(&self.retention_per_account) {
             return Err("每个账户保留的检测记录数须为1至100".into());
+        }
+        if self.failure_retries > 99 {
+            return Err("失败后重试次数须为0至99".into());
         }
         if !(1..=16).contains(&self.max_concurrency) {
             return Err("并行检测数须为1至16".into());
@@ -460,13 +474,36 @@ fn no_action() -> String {
     "none".into()
 }
 impl Job {
+    pub fn can_disable(&self) -> bool {
+        self.verdict == "degraded"
+            || (self.status == "failed"
+                && matches!(
+                    self.config.request_rejected_action,
+                    RequestRejectedAction::Disable
+                )
+                && self.attempts.last().is_some_and(|a| {
+                    a.diagnostics
+                        .as_ref()
+                        .is_some_and(|d| d.kind == "request_rejected")
+                }))
+    }
     pub fn actions_pending(&self) -> bool {
         [&self.disable_state, &self.group_state]
             .iter()
             .any(|s| ["pending", "attempting"].contains(&s.as_str()))
     }
     pub fn action_message(&mut self) {
-        let mut parts = vec!["已确认降智".to_string()];
+        let mut parts = vec![if self.status == "failed" {
+            format!(
+                "检测失败：{}",
+                self.attempts
+                    .last()
+                    .and_then(|a| a.error.as_deref())
+                    .unwrap_or("请求被拒绝")
+            )
+        } else {
+            "已确认降智".to_string()
+        }];
         for (state, pending, done, failed, error) in [
             (
                 &self.disable_state,
@@ -592,6 +629,33 @@ mod tests {
             .remove("triggerCooldownMinutes");
         let cfg: Config = serde_json::from_value(value).unwrap();
         assert_eq!(cfg.trigger_cooldown_minutes, 30);
+    }
+    #[test]
+    fn failure_retry_settings_validate_and_default_for_old_configs() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        for field in ["failureRetries", "requestRejectedAction"] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        let mut cfg: Config = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(cfg.failure_retries, 4);
+        assert!(matches!(
+            cfg.request_rejected_action,
+            RequestRejectedAction::Continue
+        ));
+        let models = vec!["gpt-5.6-luna".to_string()];
+        for retries in [0, 99] {
+            cfg.failure_retries = retries;
+            assert!(cfg.validate(&models).is_ok());
+        }
+        cfg.failure_retries = 100;
+        assert!(cfg.validate(&models).is_err());
+        for retries in [serde_json::json!(-1), serde_json::json!(1.5)] {
+            value["failureRetries"] = retries;
+            assert!(serde_json::from_value::<Config>(value.clone()).is_err());
+        }
+        value["failureRetries"] = serde_json::json!(0);
+        value["requestRejectedAction"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<Config>(value).is_err());
     }
     #[test]
     fn v14_defaults_and_legacy_records() {

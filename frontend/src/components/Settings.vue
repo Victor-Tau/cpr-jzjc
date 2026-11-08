@@ -76,7 +76,7 @@ const dirty = computed(() => {
   return !mapping || snapshot(cfg.value, mapping) !== savedSnapshot.value
 })
 
-type NumberKey = 'maxOutputTokens' | 'timeoutSeconds' | 'maxConcurrency' | 'lowConfidencePercent' | 'degradedPercent' | 'confirmationRounds' | 'lowConfidenceRetries' | 'retryDelaySeconds' | 'retentionPerAccount' | 'triggerCooldownMinutes' | 'updateIntervalHours'
+type NumberKey = 'maxOutputTokens' | 'timeoutSeconds' | 'maxConcurrency' | 'lowConfidencePercent' | 'degradedPercent' | 'confirmationRounds' | 'lowConfidenceRetries' | 'failureRetries' | 'retryDelaySeconds' | 'retentionPerAccount' | 'triggerCooldownMinutes' | 'updateIntervalHours'
 interface NumberField { key: NumberKey; label: string; min: number; max?: number; step?: number; help: string; detail?: string }
 const number = (event: Event, key: NumberKey) => { cfg.value[key] = Number((event.target as HTMLInputElement).value) }
 const requestNumbers: NumberField[] = [
@@ -91,6 +91,7 @@ const ruleNumbers: NumberField[] = [
   { key: 'degradedPercent', label: '降智判定阈值（%）', min: 0, max: 100, step: 0.1, help: '命中降级名单且概率达到此值即判定降智。' },
   { key: 'confirmationRounds', label: '连续确认轮数', min: 1, max: 5, help: '连续判定降智达到该轮数才确认（1–5）。' },
   { key: 'lowConfidenceRetries', label: '低置信度额外复测次数', min: 0, max: 5, help: '低置信度时最多追加的复测次数（0–5）。' },
+  { key: 'failureRetries', label: '失败后重试（次）', min: 0, max: 99, step: 1, help: '每轮采样失败后额外重试 0–99 次，默认 4；0 表示只请求一次。认证、权限、参数拒绝也计入。' },
   { key: 'retentionPerAccount', label: '每账号保留检测记录数', min: 1, max: 100, help: '每个账户只保留最近 N 条检测记录（1–100），超出的旧记录在提交检测、保存参数和后台维护时清理。' },
   { key: 'retryDelaySeconds', label: '复测与失败重试间隔（秒）', min: 0, max: 3600, help: '两次复测或失败重试之间的等待（0–3600）。' },
 ]
@@ -104,6 +105,7 @@ const planOptions = computed(() => Array.from(new Set(props.accounts.map(a => a.
 const statusOptions = [{ value: '', label: '全部已启用状态' }, ...['normal', 'error', 'quota_exhausted', 'rate_limited'].map(value => ({ value, label: ({ normal: '正常', error: '异常', quota_exhausted: '额度耗尽', rate_limited: '限流' } as Record<string, string>)[value]! }))]
 const kindOptions = [{ value: 'interval', label: '固定间隔' }, { value: 'daily', label: '每日时刻' }]
 const scopeOptions = [{ value: 'filter', label: '动态匹配筛选条件' }, { value: 'ids', label: '固定账户列表' }]
+const rejectedOptions = [{ value: 'continue', label: '保留账户调度，下次继续自动检测' }, { value: 'disable', label: '停止该账户调度' }]
 
 // Degraded-model chips grouped by family; selections missing from the
 // active bank stay visible so they can be removed before saving.
@@ -143,9 +145,9 @@ const bankMeta = computed(() => [
 ])
 
 function useDefaults() {
-  Object.assign(cfg.value, { lowConfidencePercent: 20, degradedPercent: 90, confirmationRounds: 1, lowConfidenceRetries: 1, retryDelaySeconds: 10, retentionDays: 3, retentionPerAccount: 10, triggerErrorCodes: [], triggerCooldownMinutes: 30 })
+  Object.assign(cfg.value, { lowConfidencePercent: 20, degradedPercent: 90, confirmationRounds: 1, lowConfidenceRetries: 1, failureRetries: 4, requestRejectedAction: 'continue', retryDelaySeconds: 10, retentionDays: 3, retentionPerAccount: 10, triggerErrorCodes: [], triggerCooldownMinutes: 30 })
   codesText.value = ''
-  rulesNotice.value = '已填入 1.4 默认规则（并清空日志触发错误码、冷却恢复 30 分钟），保存后生效。'
+  rulesNotice.value = '已填入默认规则（失败重试 4 次、请求拒绝后保留调度，并清空日志触发错误码、冷却恢复 30 分钟），保存后生效。'
 }
 function exportConfig() {
   const data = { format: 'modeltrace-health-config', version: 1, pluginId: 'personal.modeltrace-health', config: props.config }
@@ -245,7 +247,7 @@ function save() {
     <section class="panel" :aria-labelledby="id('rules')">
       <div class="panel-head">
         <div class="panel-title"><span class="panel-icon"><ShieldAlert :size="17" /></span><div><h3 :id="id('rules')">降智判定与复测</h3><p>请求模型不在降级名单内，而最高候选命中名单且概率达到阈值时，按确认轮数判定降智。</p></div></div>
-        <div class="panel-actions"><ZButton :disabled="busy" title="阈值 20% / 90%，确认 1 轮，复测 1 次，间隔 10 秒，并清空日志触发错误码" @click="useDefaults"><template #icon><RotateCcw :size="14" /></template>使用 1.4 默认规则</ZButton></div>
+        <div class="panel-actions"><ZButton :disabled="busy" title="阈值 20% / 90%，确认 1 轮，复测 1 次，失败重试 4 次，保留账户调度，间隔 10 秒，并清空日志触发错误码" @click="useDefaults"><template #icon><RotateCcw :size="14" /></template>使用默认规则</ZButton></div>
       </div>
       <div v-if="rulesNotice" class="notice tone-info block" role="status"><Info :size="15" /><span>{{ rulesNotice }}</span></div>
 
@@ -271,6 +273,11 @@ function save() {
           <label class="field-label" :for="id(f.key)">{{ f.label }}</label>
           <input :id="id(f.key)" class="control" type="number" :min="f.min" :max="f.max" :step="f.step" :value="cfg[f.key]" :aria-describedby="id(`${f.key}-help`)" @input="number($event, f.key)">
           <span :id="id(`${f.key}-help`)" class="help">{{ f.help }}</span>
+        </div>
+        <div class="field span-all">
+          <span class="field-label">请求被拒绝后的处理</span>
+          <ZSelect v-model="cfg.requestRejectedAction" :options="rejectedOptions" aria-label="请求被拒绝后的处理" />
+          <span class="help">认证、Key 权限或模型参数被拒绝且失败重试耗尽后生效。保留调度时，已启用的定时或日志触发可在下次继续检测；停止调度后需在宿主手动恢复。此项独立于确认降智后的处理。</span>
         </div>
         <div class="field span-all">
           <label class="field-label" :for="id('aliases')">模型别名</label>

@@ -141,7 +141,8 @@ function progressText(j: Job | Report) {
   if (!p || !active(j as Job)) return j.message
   const labels: Record<string,string>={preparing:'正在准备挑战',requesting:'正在发送请求',waiting_response:'等待模型响应',receiving:'正在接收回答',waiting_validation:'已保存回答，等待校验',validating:'正在校验样本',waiting_score:'已获得有效样本，等待评分',scoring:'正在分析结果',waiting_retry:'等待重试',waiting_retest:'等待复测',cancelling:'正在取消检测',waiting_request:'准备完成，等待发起请求'}
   const remaining=p.detail.nextAt ? Math.max(0,Math.ceil((p.detail.nextAt-clock.value)/1000)) : 0
-  if (p.stage==='waiting_retry' || p.stage==='waiting_retest') return `${j.message || labels[p.stage]}${j.roundAttempts ? `（本轮已尝试 ${j.roundAttempts}/5 次）` : ''} · ${remaining>0 ? `${remaining} 秒后可执行` : '等待调度'}`
+  const attemptLimit='config' in j ? j.config.failureRetries+1 : j.attemptLimit ?? 5
+  if (p.stage==='waiting_retry' || p.stage==='waiting_retest') return `${j.message || labels[p.stage]}${j.roundAttempts ? `（本轮已尝试 ${j.roundAttempts}/${attemptLimit} 次）` : ''} · ${remaining>0 ? `${remaining} 秒后可执行` : '等待调度'}`
   const stale=Math.max(0,Math.floor((clock.value-(p.updatedAt || p.stageStartedAt))/1000))
   if (p.stage==='receiving' && stale>=8) return `进度已过期（${stale} 秒未更新），等待后台恢复`
   if (stale>=90) return `进度长时间未更新（${stale} 秒），等待后台恢复`
@@ -178,6 +179,7 @@ const snapshot = computed(() => {
   if (!r || !c) return []
   return [
     ['请求模型', c.requestModel], ['推理强度', c.reasoningEffort || '默认'], ['温度', c.temperature ?? '默认'], ['最大输出', `${c.maxOutputTokens} tokens`],
+    ['失败后重试', `${c.failureRetries} 次`], ['请求被拒绝后', c.requestRejectedAction==='disable' ? '停止账户调度' : '保留调度，下次继续检测'],
     ['单次请求超时', `${c.timeoutSeconds} 秒`], ['降智判定阈值', `${c.degradedPercent}%`], ['低置信度阈值', `${c.lowConfidencePercent}%`], ['连续确认轮数', `${c.confirmationRounds} 轮`],
     ['低置信度复测', `${c.lowConfidenceRetries} 次`], ['降智模型', c.degradedModels?.join('、') || '—'], ['指纹库提交', r.bankCommit || '—'], ['引擎提交', r.engineCommit || '—'],
   ] as [string, string | number][]
