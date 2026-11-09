@@ -46,7 +46,7 @@
 | --- | --- |
 | 插件版本 | **1.20.0** |
 | CPR 宿主 | **>=3.44.0、<3.45.0** |
-| 平台 | **Linux x86_64，glibc 2.36+** |
+| 平台 | **Linux x86_64 / ARM64（aarch64），glibc 2.36+** |
 | 运行模式 | `trustedProcess` |
 | 评分运行时 | 已包含私有 Python/NumPy，无需另装系统 Python 或部署 ModelTrace 服务 |
 
@@ -54,12 +54,14 @@
 
 ### 首次安装
 
-1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载 `personal.modeltrace-health-1.20.0-x86_64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
+1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 选择与宿主架构匹配的安装包：x86_64 对应 `*-x86_64-unknown-linux-gnu.tar.gz`，ARM64 对应 `*-aarch64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
 2. 在 CPR 中打开「插件管理 → 安装插件 → 上传包」，上传下载的安装包并启用。
 3. 打开「账号降智检测 → 参数配置」，选择已有计量 Key，确认请求模型及判定规则，点击「保存全部参数」。
 4. 回到「账户检测」，先选择一个账户执行检测，在报告中查看结果，再按需启用批量检测或定时检查。
 
 下载的是 Release 附件中的插件安装包；GitHub 自动生成的 `Source code` 归档用于源码开发。
+
+两种架构使用同一个插件版本。历史 Release 若没有 ARM64 附件，可按 [开发与构建](docs/development.md) 从对应源码构建。PR 与主分支更新会自动验证两种架构；推送与插件版本一致的 `v<版本>` 标签后，发布流程会在两种架构均通过后上传安装包。
 
 检测请求由宿主绑定到账户 ID，沿用该账户的代理，并计入所选 Key 的用量。Key 的账户分组和模型权限由宿主校验，插件页面只读取 Key ID 和名称。
 

@@ -1,6 +1,7 @@
 """Verify archive digests, isolated-page resources, and packaged offline scoring."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -8,8 +9,15 @@ import tarfile
 import tempfile
 from html.parser import HTMLParser
 from protocol_smoke import Host
+from runtime_target import TARGETS, validate_elf
 
 package = Path(sys.argv[1]).resolve()
+source_manifest = json.loads((Path(__file__).resolve().parents[1]/'plugin.json').read_text())
+target = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("CPR_TARGET", "x86_64-unknown-linux-gnu")
+if target not in TARGETS:
+    raise SystemExit(f"Unsupported target: {target}")
+spec = TARGETS[target]
+libdir, loader = spec["libdir"], spec["loader"]
 digest = hashlib.sha256(package.read_bytes()).hexdigest()
 assert package.with_name(package.name+'.sha256').read_text().split()[0] == digest
 assert package.stat().st_size <= 32*1024*1024
@@ -21,12 +29,14 @@ with tempfile.TemporaryDirectory(prefix='modeltrace-package-check-') as director
             assert e.isfile() or e.isdir()
         archive.extractall(root,filter='data')
     manifest=json.loads((root/'plugin.json').read_text())
-    assert manifest['publisher']== 'personal' and manifest['name']== 'modeltrace-health'
+    for field in ('publisher', 'name', 'version', 'engines', 'main', 'runtime', 'state'):
+        assert manifest[field] == source_manifest[field], f'Manifest field differs from source: {field}'
     assert manifest['package']['protocolVersion'] == 7
-    assert manifest['engines']['codex-proxy-rs'] == '>=3.44.0, <3.45.0'
+    assert manifest['package']['target'] == {'os': 'linux', 'architecture': target.split('-')[0]}
     assert set(manifest['package']['files']) == {manifest['main'], *manifest['resources']}
     for path, expected in manifest['package']['files'].items():
         assert hashlib.sha256((root/path).read_bytes()).hexdigest() == expected, path
+    validate_elf((root/manifest['main']).read_bytes()[:20], target)
     class Page(HTMLParser):
         def handle_starttag(self,tag,attrs):
             a=dict(attrs)
@@ -37,8 +47,13 @@ with tempfile.TemporaryDirectory(prefix='modeltrace-package-check-') as director
             assert a.get('type') != 'module'
     Page().feed((root/'web/index.html').read_text())
     runtime=root/'runtime-expanded';runtime.mkdir()
-    with tarfile.open(root/'runtime/runtime.tar.gz') as archive:archive.extractall(runtime,filter='data')
-    command=[str(runtime/'usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2'),'--library-path',str(runtime/'usr/local/lib')+':'+str(runtime/'usr/lib/x86_64-linux-gnu'),str(runtime/'usr/local/bin/python3.11'),'-B',str(runtime/'engine/worker.py')]
+    with tarfile.open(root/'runtime/runtime.tar.gz') as archive:
+        for entry in archive:
+            assert entry.isfile() and not Path(entry.name).is_absolute() and '..' not in Path(entry.name).parts
+            header = archive.extractfile(entry).read(20)
+            if header.startswith(b'\x7fELF'): validate_elf(header, target)
+        archive.extractall(runtime,filter='data')
+    command=[str(runtime/f'usr/lib/{libdir}/{loader}'),'--library-path',str(runtime/'usr/local/lib')+':'+str(runtime/f'usr/lib/{libdir}'),str(runtime/'usr/local/bin/python3.11'),'-B',str(runtime/'engine/worker.py')]
     result=subprocess.run(command,input=json.dumps({'op':'validate','path':str(runtime/'vendor/modeltrace/data/unified_bank.json')})+'\n',text=True,capture_output=True,env={'PYTHONHOME':str(runtime/'usr/local'),'OPENBLAS_NUM_THREADS':'1'},timeout=15)
     assert result.returncode==0,result.stderr
     data=json.loads(result.stdout);assert data['ok'],data
