@@ -156,14 +156,17 @@ impl Engine {
             if let Some(python) = dev {
                 command = tokio::process::Command::new(python);
             } else {
+                #[cfg(target_arch = "aarch64")]
+                let (libdir, loader) = ("aarch64-linux-gnu", "ld-linux-aarch64.so.1");
+                #[cfg(not(target_arch = "aarch64"))]
+                let (libdir, loader) = ("x86_64-linux-gnu", "ld-linux-x86-64.so.2");
                 command = tokio::process::Command::new(
-                    self.root
-                        .join("usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"),
+                    self.root.join(format!("usr/lib/{libdir}/{loader}")),
                 );
                 command
                     .arg("--library-path")
                     .arg(format!(
-                        "{}/usr/local/lib:{}/usr/lib/x86_64-linux-gnu",
+                        "{}/usr/local/lib:{}/usr/lib/{libdir}",
                         self.root.display(),
                         self.root.display()
                     ))
