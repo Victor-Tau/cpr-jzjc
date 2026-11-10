@@ -8,6 +8,7 @@
 
 | 插件版本 | CPR 宿主范围 |
 | --- | --- |
+| 1.21.0 | >=3.44.0、<3.45.0 |
 | 1.20.0 | >=3.44.0、<3.45.0 |
 | 1.19.0 | >=3.43.0、<3.44.0 |
 | 1.18.0 | >=3.42.0、<3.43.0 |
@@ -28,6 +29,15 @@
 | 1.3.0–1.5.0 | >=3.29.1、<3.30.0 |
 
 升级时通过宿主更新现有插件实例，可保留兼容 schema 下的配置、计划、历史与指纹库。版本中特有的数据保留变化在对应条目注明。
+
+## [1.21.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.21.0) — 2026-11-09
+
+- 新增 Linux ARM64（`aarch64-unknown-linux-gnu`）安装包；x86_64 与 ARM64 使用同一插件版本，按安装包名称和 manifest 的 `package.target` 区分架构。
+- 后端按编译目标选择私有 Python 的动态加载器与库目录；运行时构建、复用和产物校验按目标核对固定镜像、NumPy wheel 摘要及 ELF 架构。
+- 新增 GitHub Actions：PR 与主分支在原生 x86_64、ARM64 runner 上构建并执行完整 RPC 回归；版本标签在两种架构均通过后发布安装包。
+- 业务逻辑、评分算法、RPC v7、管理能力 v2 和私有状态 schema 不变，宿主范围仍为 `>=3.44.0,<3.45.0`。感谢 @mfandcc 贡献（#5）。
+
+[详细说明](docs/releases/v1.21.0.md) · [验证记录](docs/verification.md)
 
 ## [1.20.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.20.0) — 2026-11-09
 
