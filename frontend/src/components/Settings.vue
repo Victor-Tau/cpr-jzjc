@@ -9,7 +9,7 @@ import {
   ArchiveRestore, BellRing, CalendarClock, Check, ChevronDown, CircleAlert, Clock, Copy, DatabaseBackup, Download, Fingerprint,
   Info, RefreshCw, RotateCcw, Save, ShieldAlert, SlidersHorizontal, TriangleAlert, Undo2, Upload, UserX,
 } from '@lucide/vue'
-import { api, date } from '../api'
+import { api, date, statusLabels } from '../api'
 import type { Account, Banks, Config, ErrorTrigger, Group } from '../types'
 
 const props = defineProps<{ config: Config; revision: number; banks: Banks; keys: { id: string; name: string }[]; accounts: Account[]; groups: Group[]; selected: string[]; nextDue: number | null; scheduleError: string | null; busy: boolean; errorTrigger?: ErrorTrigger }>()
@@ -102,7 +102,7 @@ const effortOptions = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'].
 const targetOptions = computed(() => props.groups.map(g => ({ value: g.id, label: g.name })))
 const groupOptions = computed(() => [{ value: '', label: '全部分组' }, { value: '__ungrouped__', label: '未分组' }, ...props.groups.map(g => ({ value: g.id, label: g.name }))])
 const planOptions = computed(() => Array.from(new Set(props.accounts.map(a => a.planType || 'unknown'))).sort().map(p => ({ value: p, label: p })))
-const statusOptions = [{ value: '', label: '全部已启用状态' }, ...['normal', 'error', 'quota_exhausted', 'rate_limited'].map(value => ({ value, label: ({ normal: '正常', error: '异常', quota_exhausted: '额度耗尽', rate_limited: '限流' } as Record<string, string>)[value]! }))]
+const statusOptions = [{ value: '', label: '全部已启用状态' }, ...Object.entries(statusLabels).map(([value, label]) => ({ value, label }))]
 const kindOptions = [{ value: 'interval', label: '固定间隔' }, { value: 'daily', label: '每日时刻' }]
 const scopeOptions = [{ value: 'filter', label: '动态匹配筛选条件' }, { value: 'ids', label: '固定账户列表' }]
 const rejectedOptions = [{ value: 'continue', label: '保留账户调度，下次继续自动检测' }, { value: 'disable', label: '停止该账户调度' }]

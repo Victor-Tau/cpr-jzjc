@@ -37,7 +37,7 @@ def main():
                 "email": "user@example.com" if i == 1 else f"account-{i}@example.com",
                 "provider": "openai", "supported": True,
                 "enabled": i % 7 != 0,
-                "status": "error" if i % 10 == 0 else "quota_exhausted" if i % 11 == 0 else "rate_limited" if i % 13 == 0 else "normal",
+                "status": "error" if i % 10 == 0 else "quota_exhausted" if i % 11 == 0 else "quota_paused" if i % 17 == 0 else "rate_limited" if i % 13 == 0 else "normal",
                 "planType": ["free", "plus", "pro", "team"][i % 4],
                 "groups": [{"id": f"group-{i % 3}", "name": ["默认组", "业务组", "备用组"][i % 3]}],
             })
