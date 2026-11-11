@@ -9,7 +9,7 @@ import { ZTable, type TableColumn } from '@codex-proxy/ui/table'
 import { ZPagination } from '@codex-proxy/ui/pagination'
 import { ZDialog } from '@codex-proxy/ui/dialog'
 import Settings from './components/Settings.vue'
-import { api, active, date, percent, status, verdict } from './api'
+import { api, active, date, percent, status, statusLabels, verdict } from './api'
 import { createRequestId } from './request-id'
 import type { Account, Banks, Config, ErrorTrigger, Group, Job, Report } from './types'
 
@@ -35,8 +35,8 @@ const clock = ref(Date.now())
 const requestIds = new Map<string,string>()
 const plans = computed(() => [{ value:'',label:'全部订阅' }, ...Array.from(new Set(accounts.value.map(a => a.planType || 'unknown'))).sort().map(p => ({ value:p,label:p }))])
 const groups = computed(() => [{ value:'',label:'全部分组' }, {value:'__ungrouped__',label:'未分组'}, ...Array.from(new Map(accounts.value.flatMap(a => a.groups).map(g => [g.id,g])).values()).map(g => ({value:g.id,label:g.name}))])
-const statuses = computed(() => [{value:'',label:'全部账户状态'},{value:'disabled',label:'已停用'},...Array.from(new Set(accounts.value.map(a => a.status))).map(s => ({ value:s,label:({normal:'正常',error:'异常',quota_exhausted:'额度耗尽',rate_limited:'限流'} as Record<string,string>)[s] || s }))])
-const accountTone = (a: Account): Tone => !a.enabled ? 'neutral' : ({ normal:'success', error:'danger', quota_exhausted:'warning', rate_limited:'warning' } as Record<string,Tone>)[a.status] || 'info'
+const statuses = computed(() => [{value:'',label:'全部账户状态'},{value:'disabled',label:'已停用'},...Array.from(new Set(accounts.value.map(a => a.status))).map(s => ({ value:s,label:statusLabels[s] || s }))])
+const accountTone = (a: Account): Tone => !a.enabled ? 'neutral' : ({ normal:'success', error:'danger', quota_paused:'warning', quota_exhausted:'warning', rate_limited:'warning' } as Record<string,Tone>)[a.status] || 'info'
 const latest = computed(() => { const result = new Map<string, Job>(); for (const job of jobs.value) if (!result.has(job.accountId)) result.set(job.accountId, job); return result })
 const jobOf = (a: Account) => latest.value.get(a.id)
 const manualActive = (a: Account) => jobs.value.some(j => j.accountId === a.id && j.source === 'manual' && active(j))

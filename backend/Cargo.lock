@@ -236,7 +236,7 @@ dependencies = [
 [[package]]
 name = "gateway-plugin-sdk"
 version = "0.1.0"
-source = "git+https://github.com/zyycn/codex-proxy-rs.git?rev=c622f085748f812936a7371fcc85d1621fa72ca8#c622f085748f812936a7371fcc85d1621fa72ca8"
+source = "git+https://github.com/zyycn/codex-proxy-rs.git?rev=431992a7a43be32a0fad2fbc8a554732096fa299#431992a7a43be32a0fad2fbc8a554732096fa299"
 dependencies = [
  "base64 0.23.1",
  "semver",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "modeltrace-health"
-version = "1.21.0"
+version = "1.22.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
