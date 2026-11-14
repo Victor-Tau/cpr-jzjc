@@ -8,6 +8,7 @@
 
 | 插件版本 | CPR 宿主范围 |
 | --- | --- |
+| 1.24.0 | >=3.48.0、<3.49.0 |
 | 1.23.0 | >=3.47.0、<3.48.0 |
 | 1.22.0 | >=3.45.1、<3.46.0 |
 | 1.21.0 | >=3.44.0、<3.45.0 |
@@ -32,13 +33,21 @@
 
 升级时通过宿主更新现有插件实例，可保留兼容 schema 下的配置、计划、历史与指纹库。版本中特有的数据保留变化在对应条目注明。
 
+## [1.24.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.24.0) — 2026-11-14
+
+- 适配 CPR 3.48.0（宿主范围 `>=3.48.0,<3.49.0`），SDK 与官方打包工具固定至提交 `d787195f4ed335a28368c2b334b5ab569b938fbf`；x86_64 与 ARM64 安装包同步发布。
+- 核对插件 SDK、manifest v2、RPC v7、管理能力 v2、维护能力 v1 及插件使用的宿主接口；接口与私有状态 schema 不变，无需调整插件业务代码。
+- 同实例升级保留配置、计划、检测历史和指纹库。
+
+[详细说明](docs/releases/v1.24.0.md) · [验证记录](docs/verification.md)
+
 ## [1.23.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.23.0) — 2026-11-13
 
 - 适配 CPR 3.47.0（宿主范围 `>=3.47.0,<3.48.0`），SDK 与官方打包工具固定至提交 `0e02a056b5a4fcb9fe204e741cbc20575041d7ba`；x86_64 与 ARM64 安装包同步发布。
 - 核对插件包、manifest v2、RPC v7、管理能力 v2、维护能力 v1 及私有状态 schema；现有账户检测、设置、状态和请求日志接口保持兼容。
 - 同实例升级保留配置、计划、检测历史和指纹库。
 
-[详细说明](docs/releases/v1.23.0.md) · [验证记录](docs/verification.md)
+[详细说明](docs/releases/v1.23.0.md) · [验证记录](docs/verification-v1.23.0.md)
 
 ## [1.22.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.22.0) — 2026-11-11
 
