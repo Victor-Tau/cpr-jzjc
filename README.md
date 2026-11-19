@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/Victor-Tau/cpr-jzjc)](https://github.com/Victor-Tau/cpr-jzjc/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CPR: 3.52.2](https://img.shields.io/badge/CPR-3.52.2-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs)
+[![CPR: 3.53.1](https://img.shields.io/badge/CPR-3.53.1-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs)
 
 在 **Codex Proxy RS（CPR）** 管理页面中，批量检测账户的模型输出、查看指纹匹配结果，并按自定义规则执行复测、定时检查和账户处理。
 
@@ -44,8 +44,8 @@
 
 | 项目 | 当前发布版本要求 |
 | --- | --- |
-| 插件版本 | **1.27.0** |
-| CPR 宿主 | **>=3.52.2、<3.53.0** |
+| 插件版本 | **1.28.0** |
+| CPR 宿主 | **>=3.53.1、<3.54.0** |
 | 平台 | **Linux x86_64 / ARM64（aarch64），glibc 2.36+** |
 | 运行模式 | `trustedProcess` |
 | 评分运行时 | 已包含私有 Python/NumPy，无需另装系统 Python 或部署 ModelTrace 服务 |
@@ -71,7 +71,7 @@
 
 在宿主插件管理中上传新版本包，更新并切换**现有插件实例**。同实例升级保留配置、计划、检测历史和指纹库；升级前也可在「参数配置 → 配置备份」导出配置。
 
-[1.27.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.27.0) 适配 CPR 3.52.2；[1.26.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.26.0) 适配 CPR 3.51.0；[1.25.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.25.0) 适配 CPR 3.49.0；[1.24.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.24.0) 适配 CPR 3.48.0；[1.23.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.23.0) 适配 CPR 3.47.0。同实例升级保留配置、计划、历史和指纹库，x86_64 与 ARM64 分别下载对应安装包。
+[1.28.0](docs/releases/v1.28.0.md) 适配 CPR 3.53.1；[1.27.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.27.0) 适配 CPR 3.52.2；[1.26.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.26.0) 适配 CPR 3.51.0；[1.25.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.25.0) 适配 CPR 3.49.0；[1.24.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.24.0) 适配 CPR 3.48.0；[1.23.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.23.0) 适配 CPR 3.47.0。同实例升级保留配置、计划、历史和指纹库，x86_64 与 ARM64 分别下载对应安装包。
 
 [1.21.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.21.0) 新增 Linux ARM64（aarch64）安装包，宿主范围与 1.20.0 相同（CPR 3.44.0）。同实例升级保留配置、计划、历史和指纹库；更新时选择与宿主架构一致的安装包。
 
