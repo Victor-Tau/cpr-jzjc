@@ -36,7 +36,7 @@
 
 升级时通过宿主更新现有插件实例，可保留兼容 schema 下的配置、计划、历史与指纹库。版本中特有的数据保留变化在对应条目注明。
 
-## [1.27.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.27.0) — 2026-11-18
+## [1.27.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.27.0) — 2026-11-19
 
 - 适配 CPR 3.52.2（宿主范围 `>=3.52.2,<3.53.0`），SDK 与官方打包工具固定至提交 `3d834c9e93f6b831d21dbdaead1b7d63a0e03470`；x86_64 与 ARM64 安装包同步发布。
 - 对照 CPR v3.51.0 与 v3.52.2 官方源码，插件 SDK、打包器、manifest v2、RPC v7、管理能力 v2、维护能力 v1 均无变化，无需调整插件业务代码。
