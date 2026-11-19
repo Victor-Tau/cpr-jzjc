@@ -8,6 +8,7 @@
 
 | 插件版本 | CPR 宿主范围 |
 | --- | --- |
+| 1.28.0 | >=3.53.1、<3.54.0 |
 | 1.27.0 | >=3.52.2、<3.53.0 |
 | 1.26.0 | >=3.51.0、<3.52.0 |
 | 1.25.0 | >=3.49.0、<3.50.0 |
@@ -36,13 +37,21 @@
 
 升级时通过宿主更新现有插件实例，可保留兼容 schema 下的配置、计划、历史与指纹库。版本中特有的数据保留变化在对应条目注明。
 
+## [1.28.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.28.0) — 2026-11-19
+
+- 适配 CPR 3.53.1（宿主范围 `>=3.53.1,<3.54.0`），SDK 与官方打包工具固定至提交 `188a6817d141a8d9a1a0bceead4f07477d35276e`；x86_64 与 ARM64 安装包同步发布。
+- 对照 CPR v3.52.2 与 v3.53.1 官方源码，插件 SDK 代码、打包器、manifest v2、RPC v7、管理能力 v2、维护能力 v1 均无变化（仅文档调整），无需调整插件业务代码。
+- 同实例升级保留配置、计划、检测历史和指纹库。
+
+[详细说明](docs/releases/v1.28.0.md) · [验证记录](docs/verification.md)
+
 ## [1.27.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.27.0) — 2026-11-19
 
 - 适配 CPR 3.52.2（宿主范围 `>=3.52.2,<3.53.0`），SDK 与官方打包工具固定至提交 `3d834c9e93f6b831d21dbdaead1b7d63a0e03470`；x86_64 与 ARM64 安装包同步发布。
 - 对照 CPR v3.51.0 与 v3.52.2 官方源码，插件 SDK、打包器、manifest v2、RPC v7、管理能力 v2、维护能力 v1 均无变化，无需调整插件业务代码。
 - 同实例升级保留配置、计划、检测历史和指纹库。
 
-[详细说明](docs/releases/v1.27.0.md) · [验证记录](docs/verification.md)
+[详细说明](docs/releases/v1.27.0.md) · [验证记录](docs/verification-v1.27.0.md)
 
 ## [1.26.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.26.0) — 2026-11-17
 
@@ -92,7 +101,7 @@
 - 新增 GitHub Actions：PR 与主分支在原生 x86_64、ARM64 runner 上构建并执行完整 RPC 回归；版本标签在两种架构均通过后发布安装包。
 - 业务逻辑、评分算法、RPC v7、管理能力 v2 和私有状态 schema 不变，宿主范围仍为 `>=3.44.0,<3.45.0`。感谢 @mfandcc 贡献（#5）。
 
-[详细说明](docs/releases/v1.21.0.md) · [验证记录](docs/verification.md)
+[详细说明](docs/releases/v1.21.0.md) · [验证记录](docs/verification-v1.27.0.md)
 
 ## [1.20.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.20.0) — 2026-11-09
 
@@ -100,7 +109,7 @@
 - 核对新增代理查询与按代理 ID 请求能力；现有账户检测和指纹库下载接口保持兼容。
 - 保留 RPC v7、管理能力 v2 和既有私有状态 schema，同实例升级保留配置、计划、检测历史及指纹库。
 
-[详细说明](docs/releases/v1.20.0.md) · [验证记录](docs/verification.md)
+[详细说明](docs/releases/v1.20.0.md) · [验证记录](docs/verification-v1.27.0.md)
 
 ## [1.19.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.19.0) — 2026-11-08
 
@@ -110,7 +119,7 @@
 - 检测失败不会标记为降智或触发移组；报告保留失败原因、请求记录与配置快照，进度显示任务实际请求次数上限。
 - 同实例升级保留配置、计划、历史及指纹库；旧配置自动补齐新字段。
 
-[详细说明](docs/releases/v1.19.0.md) · [验证记录](docs/verification.md)
+[详细说明](docs/releases/v1.19.0.md) · [验证记录](docs/verification-v1.27.0.md)
 
 ## [1.18.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.18.0) — 2026-11-06
 
@@ -170,7 +179,7 @@
 
 宿主范围、SDK、RPC v7、管理能力 v2、UI 0.8.0 与私有状态 schema 不变，同实例升级保留配置、计划、历史和指纹库；旧配置的触发冷却按 30 分钟补齐。
 
-[详细说明](docs/releases/v1.14.0.md) · [验证记录](docs/verification.md)
+[详细说明](docs/releases/v1.14.0.md) · [验证记录](docs/verification-v1.27.0.md)
 
 ## [1.13.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.13.0) — 2026-11-02
 
