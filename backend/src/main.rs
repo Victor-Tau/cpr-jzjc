@@ -2,6 +2,7 @@ mod banks;
 mod domain;
 mod engine;
 mod host;
+mod lmfpd;
 mod management;
 mod manager;
 mod progress;
@@ -85,7 +86,7 @@ fn registration() -> ManagementRegistration {
         pages: vec![ManagementPage {
             id: "modeltrace-health".into(),
             title: "账号降智检测".into(),
-            description: Some("ModelTrace 指纹检测与定时检查".into()),
+            description: Some("lm-detector 指纹检测与定时检查".into()),
             entry: "web/index.html".into(),
             icon: None,
         }],

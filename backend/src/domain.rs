@@ -89,6 +89,13 @@ pub struct Config {
     pub mirror_prefix: String,
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: u32,
+    /// lm-detector challenges per round (1–3). Three valid replies give a calibrated confidence; fewer give a
+    /// ranking only.
+    #[serde(default = "default_challenges_per_round")]
+    pub challenges_per_round: u32,
+}
+fn default_challenges_per_round() -> u32 {
+    1
 }
 fn default_max_concurrency() -> u32 {
     4
@@ -129,6 +136,7 @@ impl Default for Config {
             update_interval_hours: 24,
             mirror_prefix: String::new(),
             max_concurrency: 4,
+            challenges_per_round: default_challenges_per_round(),
         }
     }
 }
@@ -181,14 +189,17 @@ impl Config {
         if self.failure_retries > 99 {
             return Err("失败后重试次数须为0至99".into());
         }
+        if !(1..=3).contains(&self.challenges_per_round) {
+            return Err("每轮挑战数须为1至3".into());
+        }
         if !(1..=16).contains(&self.max_concurrency) {
             return Err("并行检测数须为1至16".into());
         }
         if self.degraded_models.is_empty()
-            || self.degraded_models.len() > 32
+            || self.degraded_models.len() > 128
             || self.aliases.len() > 64
         {
-            return Err("请配置1至32个降级模型，别名最多64条".into());
+            return Err("请配置1至128个降级模型，别名最多64条".into());
         }
         if self.trigger_error_codes.len() > 32
             || self
@@ -365,14 +376,37 @@ pub struct Candidate {
     pub model: String,
     pub label: String,
     pub family: String,
+    /// Calibrated closed-set probability; `None` for a ranking-only (partial) round.
+    pub probability: Option<f64>,
+    /// lm-detector ranking score; absent in records scored by the former ModelTrace engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Family {
+    pub family: String,
+    pub display_name: String,
     pub probability: f64,
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Score {
     pub prediction: String,
-    pub probability: f64,
+    /// Calibrated probability of the top candidate; `None` when fewer than three replies were scored.
+    pub probability: Option<f64>,
     pub results: Vec<Candidate>,
     pub families: serde_json::Value,
+    /// lm-detector decision: scored, partial, unscorable or not_model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranking_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_outputs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -545,19 +579,42 @@ impl Job {
         self.samples.clear();
         self.challenges.clear();
     }
+    /// Whether every challenge of the current round has a validated sample.
+    pub fn round_ready(&self) -> bool {
+        !self.challenges.is_empty() && self.samples.len() >= self.challenges.len()
+    }
     pub fn classify(&mut self, score: &Score) -> &'static str {
-        if score.probability * 100.0 < self.config.low_confidence_percent {
+        // No ranking (not like a model reply / unscorable): retest within the low-confidence budget.
+        if score.results.is_empty() || score.prediction.is_empty() {
             self.consecutive = 0;
             return "low_confidence";
         }
         let cfg = &self.config;
-        if !cfg
+        let exempt = cfg
             .degraded_models
             .iter()
-            .any(|m| m == cfg.canonical(&cfg.request_model))
-            && cfg.degraded_models.contains(&score.prediction)
-            && score.probability * 100.0 >= cfg.degraded_percent
-        {
+            .any(|m| m == cfg.canonical(&cfg.request_model));
+        let degraded_top = !exempt && cfg.degraded_models.contains(&score.prediction);
+        let Some(probability) = score.probability else {
+            // Ranking-only round (fewer than three replies): upstream gives no confidence, so the
+            // top candidate and the consecutive-round confirmation decide alone.
+            return if degraded_top {
+                self.consecutive += 1;
+                if self.consecutive >= cfg.confirmation_rounds {
+                    "degraded"
+                } else {
+                    "suspected"
+                }
+            } else {
+                self.consecutive = 0;
+                "no_match"
+            };
+        };
+        if probability * 100.0 < cfg.low_confidence_percent {
+            self.consecutive = 0;
+            return "low_confidence";
+        }
+        if degraded_top && probability * 100.0 >= cfg.degraded_percent {
             self.consecutive += 1;
             if self.consecutive >= cfg.confirmation_rounds {
                 "degraded"
@@ -566,7 +623,7 @@ impl Job {
             }
         } else {
             self.consecutive = 0;
-            if score.probability * 100.0 < cfg.degraded_percent {
+            if probability * 100.0 < cfg.degraded_percent {
                 "inconclusive"
             } else {
                 "no_match"
@@ -584,11 +641,54 @@ mod tests {
     }
     fn score(model: &str, p: f64) -> Score {
         Score {
-            prediction: model.into(),
-            probability: p,
-            results: vec![],
-            families: serde_json::json!([]),
+            probability: Some(p),
+            ..ranking(model)
         }
+    }
+    fn ranking(model: &str) -> Score {
+        Score {
+            prediction: model.into(),
+            probability: None,
+            results: vec![Candidate {
+                model: model.into(),
+                label: model.into(),
+                family: "x".into(),
+                probability: None,
+                score: Some(1.0),
+            }],
+            families: serde_json::json!([]),
+            decision: None,
+            ranking_score: None,
+            used_outputs: None,
+            method: None,
+            reason: None,
+        }
+    }
+    #[test]
+    fn ranking_only_rounds_use_top_candidate_and_confirmation() {
+        let mut j = job();
+        j.config.confirmation_rounds = 2;
+        assert_eq!(j.classify(&ranking("gpt-5.6-luna")), "suspected");
+        assert_eq!(j.classify(&ranking("gpt-5.6-luna")), "degraded");
+        assert_eq!(j.classify(&ranking("gpt-6-sol")), "no_match");
+        assert_eq!(j.consecutive, 0);
+        let mut empty = ranking("");
+        empty.results.clear();
+        assert_eq!(j.classify(&empty), "low_confidence");
+    }
+    #[test]
+    fn legacy_scores_still_parse() {
+        let s: Score = serde_json::from_value(serde_json::json!({"prediction":"a","probability":0.5,"results":[{"model":"a","label":"a","family":"f","probability":0.5}],"families":[]})).unwrap();
+        assert_eq!(s.probability, Some(0.5));
+        assert_eq!(s.results[0].probability, Some(0.5));
+        let mut cfg = serde_json::to_value(Config::default()).unwrap();
+        cfg.as_object_mut().unwrap().remove("challengesPerRound");
+        assert_eq!(
+            serde_json::from_value::<Config>(cfg)
+                .unwrap()
+                .challenges_per_round,
+            1
+        );
     }
     #[test]
     fn thresholds_and_confirmation() {

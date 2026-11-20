@@ -1,411 +1,206 @@
+//! In-process lm-detector scoring. Replaces the former Python/NumPy worker: the detector is decoded once per
+//! fingerprint bank and every call runs natively inside the plugin process.
+use crate::domain::{Candidate, Challenge, Family, Sample, Score};
 use crate::host::fault;
+use crate::lmfpd::{self, Decision, Detector};
 use gateway_plugin_sdk::PluginFault;
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-    process::Stdio,
-};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::{collections::BTreeMap, sync::Arc};
 
-struct Worker {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    stdout: BufReader<tokio::process::ChildStdout>,
-}
+/// Largest reply accepted for parsing, as before.
+const MAX_TEXT: usize = 1024 * 1024;
 
+#[derive(Default)]
 pub struct Engine {
-    root: PathBuf,
-    directory: Option<tempfile::TempDir>,
-    worker: Option<Worker>,
+    cache: Option<(String, Arc<Detector>)>,
 }
+
 impl Engine {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn cleanup(&mut self) -> Result<(), PluginFault> {
-        if let Some(mut worker) = self.worker.take() {
-            let _ = worker.child.start_kill();
-        }
-        if let Some(directory) = self.directory.take() {
-            directory
-                .close()
-                .map_err(|_| fault("评分临时目录清理失败"))?;
-        }
-        self.root.clear();
+        self.cache = None;
         Ok(())
     }
-    pub fn new() -> Self {
-        Self {
-            root: PathBuf::new(),
-            directory: None,
-            worker: None,
-        }
-    }
-    pub fn prepare(&mut self) -> Result<(), PluginFault> {
-        if self.directory.is_some() {
-            return Ok(());
-        }
-        #[cfg(debug_assertions)]
-        if std::env::var_os("MODELTRACE_DEV_PYTHON").is_some() {
-            self.root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .to_path_buf();
-            self.directory = Some(tempfile::tempdir().map_err(|_| fault("评分临时目录创建失败"))?);
-            return Ok(());
-        }
-        let root = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent()?.parent().map(PathBuf::from))
-            .ok_or_else(|| fault("插件资源目录不可用"))?;
-        let archive = root.join("runtime/runtime.tar.gz");
-        if !archive.is_file() {
-            return Err(fault("评分运行时缺失，请安装完整插件包"));
-        }
-        let mut candidates = vec![];
-        if let Some(configured) = std::env::var_os("MODELTRACE_RUNTIME_DIR") {
-            candidates.push(PathBuf::from(configured));
-        }
-        candidates.push(std::env::temp_dir());
-        candidates.push(PathBuf::from("/var/tmp"));
-        let mut tried = std::collections::BTreeSet::new();
-        let mut errors = vec![];
-        for base in candidates {
-            if !tried.insert(base.clone()) {
-                continue;
-            }
-            if std::fs::read_to_string("/proc/self/mountinfo")
-                .map(|mounts| mount_disallows_execution(&base, &mounts))
-                .unwrap_or(false)
-            {
-                errors.push(format!("{}：挂载为 noexec，跳过", base.display()));
-                continue;
-            }
-            let directory = match tempfile::Builder::new()
-                .prefix("modeltrace-runtime-")
-                .tempdir_in(&base)
-            {
-                Ok(directory) => directory,
-                Err(error) => {
-                    errors.push(
-                        runtime_io_fault(
-                            &format!("{}：评分临时目录创建失败", base.display()),
-                            &error,
-                        )
-                        .message,
-                    );
-                    continue;
-                }
-            };
-            let file = std::fs::File::open(&archive)
-                .map_err(|_| fault("评分运行时缺失，请安装完整插件包"))?;
-            match unpack(file, directory.path()) {
-                Ok(()) => {
-                    self.root = directory.path().to_path_buf();
-                    self.directory = Some(directory);
-                    return Ok(());
-                }
-                Err(error) => errors.push(format!("{}：{}", base.display(), error.message)),
-            }
-        }
-        Err(fault(format!(
-            "评分运行时准备失败：{}；可设置 MODELTRACE_RUNTIME_DIR 为可写、可执行且至少有100MB空闲的目录",
-            errors.join("；")
-        )))
-    }
-    async fn prepared(&mut self) -> Result<(), PluginFault> {
-        if self.directory.is_some() {
-            return Ok(());
-        }
-        let mut engine = std::mem::replace(self, Self::new());
-        let (engine, result) = tokio::task::spawn_blocking(move || {
-            let result = engine.prepare();
-            (engine, result)
-        })
-        .await
-        .map_err(|_| fault("评分运行时准备任务失败"))?;
-        *self = engine;
-        result
-    }
-    pub async fn write_bank(&mut self, hash: &str, data: &[u8]) -> Result<PathBuf, PluginFault> {
-        if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
-            return Err(fault("指纹库摘要无效"));
-        }
-        self.prepared().await?;
-        let path = self
-            .directory
-            .as_ref()
-            .unwrap()
-            .path()
-            .join(format!("bank-{hash}.json"));
-        if !path.exists() {
-            std::fs::write(&path, data).map_err(|_| fault("指纹库临时加载失败"))?;
-        }
-        Ok(path)
-    }
-    pub async fn call<I: Serialize, O: DeserializeOwned>(
-        &mut self,
-        input: I,
-    ) -> Result<O, PluginFault> {
-        self.prepared().await?;
-        if self.worker.is_none() {
-            let mut command;
-            #[cfg(debug_assertions)]
-            let dev = std::env::var_os("MODELTRACE_DEV_PYTHON");
-            #[cfg(not(debug_assertions))]
-            let dev: Option<std::ffi::OsString> = None;
-            if let Some(python) = dev {
-                command = tokio::process::Command::new(python);
-            } else {
-                #[cfg(target_arch = "aarch64")]
-                let (libdir, loader) = ("aarch64-linux-gnu", "ld-linux-aarch64.so.1");
-                #[cfg(not(target_arch = "aarch64"))]
-                let (libdir, loader) = ("x86_64-linux-gnu", "ld-linux-x86-64.so.2");
-                command = tokio::process::Command::new(
-                    self.root.join(format!("usr/lib/{libdir}/{loader}")),
-                );
-                command
-                    .arg("--library-path")
-                    .arg(format!(
-                        "{}/usr/local/lib:{}/usr/lib/{libdir}",
-                        self.root.display(),
-                        self.root.display()
-                    ))
-                    .arg(self.root.join("usr/local/bin/python3.11"));
-                command
-                    .env_clear()
-                    .env("PYTHONHOME", self.root.join("usr/local"));
-            }
-            command
-                .arg("-B")
-                .arg(self.root.join("engine/worker.py"))
-                .env("OPENBLAS_NUM_THREADS", "1")
-                .env("OMP_NUM_THREADS", "1")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            let mut child = command.spawn().map_err(|_| fault("无法启动评分进程"))?;
-            let stdin = child.stdin.take().unwrap();
-            let stdout = BufReader::new(child.stdout.take().unwrap());
-            self.worker = Some(Worker {
-                child,
-                stdin,
-                stdout,
-            });
-        }
-        let mut bytes = serde_json::to_vec(&input).map_err(|_| fault("评分输入编码失败"))?;
-        bytes.push(b'\n');
-        let mut worker = self.worker.take().unwrap();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            worker
-                .stdin
-                .write_all(&bytes)
-                .await
-                .map_err(|_| fault("评分进程输入失败"))?;
-            worker
-                .stdin
-                .flush()
-                .await
-                .map_err(|_| fault("评分进程输入失败"))?;
-            let mut output = vec![];
-            loop {
-                let chunk = worker
-                    .stdout
-                    .fill_buf()
-                    .await
-                    .map_err(|_| fault("评分结果读取失败"))?;
-                if chunk.is_empty() {
-                    return Err(fault("评分进程提前结束"));
-                }
-                let end = chunk.iter().position(|&b| b == b'\n').map(|i| i + 1);
-                let count = end.unwrap_or(chunk.len());
-                if output.len() + count > 2 * 1024 * 1024 {
-                    return Err(fault("评分输出超限"));
-                }
-                output.extend_from_slice(&chunk[..count]);
-                worker.stdout.consume(count);
-                if end.is_some() {
-                    break;
-                }
-            }
-            let v: Value =
-                serde_json::from_slice(&output).map_err(|_| fault("评分输出格式错误"))?;
-            if !v["ok"].is_boolean() {
-                return Err(fault("评分输出格式错误"));
-            }
-            Ok(v)
-        })
-        .await;
-        match result {
-            Ok(Ok(reply)) => {
-                // 业务拒绝已完整读完一条响应，不能因此重启健康的 Python/NumPy。
-                self.worker = Some(worker);
-                if reply["ok"] == false {
-                    Err(fault(reply["error"].as_str().unwrap_or("评分失败")))
-                } else {
-                    serde_json::from_value(reply["data"].clone())
-                        .map_err(|_| fault("评分数据格式错误"))
-                }
-            }
-            other => {
-                let _ = worker.child.kill().await;
-                match other {
-                    Ok(Err(error)) => Err(error),
-                    _ => Err(fault("离线评分超过5秒")),
-                }
-            }
-        }
-    }
-}
-fn unpack<R: Read>(file: R, root: &Path) -> Result<(), PluginFault> {
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
-    // Some RS deployments deny timestamp syscalls in the plugin sandbox.
-    // The scoring runtime does not depend on archive mtimes.
-    archive.set_preserve_mtime(false);
-    let mut total = 0;
-    for entry in archive.entries().map_err(|_| fault("评分运行包损坏"))? {
-        let mut e = entry.map_err(|_| fault("评分运行包损坏"))?;
-        total += e.size();
-        if total > 400 * 1024 * 1024
-            || (!e.header().entry_type().is_file() && !e.header().entry_type().is_dir())
+
+    /// Decodes a packed bank (cached by its SHA-256).
+    pub fn load(&mut self, hash: &str, packed: &[u8]) -> Result<Arc<Detector>, PluginFault> {
+        if let Some((cached, detector)) = &self.cache
+            && cached == hash
         {
-            return Err(fault("评分运行包包含不支持的条目"));
+            return Ok(detector.clone());
         }
-        let path = e
-            .path()
-            .map_err(|_| fault("评分运行包路径无效"))?
-            .into_owned();
-        if !e.unpack_in(root).map_err(|error| {
-            runtime_io_fault(
-                &format!("评分运行包解压失败（条目 {}）", path.display()),
-                &error,
-            )
-        })? {
-            return Err(fault("评分运行包路径无效"));
-        }
+        let detector =
+            Arc::new(Detector::decode(packed).map_err(|e| fault(format!("指纹库解码失败：{e}")))?);
+        self.cache = Some((hash.into(), detector.clone()));
+        Ok(detector)
     }
-    Ok(())
+
+    pub fn cached(&self, hash: &str) -> Option<Arc<Detector>> {
+        self.cache
+            .as_ref()
+            .filter(|(cached, _)| cached == hash)
+            .map(|(_, detector)| detector.clone())
+    }
 }
 
-fn runtime_io_fault(action: &str, error: &std::io::Error) -> PluginFault {
-    let mut cause: &dyn std::error::Error = error;
-    while let Some(source) = cause.source() {
-        cause = source;
-    }
-    fault(format!(
-        "{action}：{cause}；请检查临时目录可用空间和写入权限（可用 TMPDIR 指定目录）"
-    ))
-}
-
-fn mount_disallows_execution(path: &Path, mounts: &str) -> bool {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    mounts
-        .lines()
-        .filter_map(|line| {
-            let fields = line.split_whitespace().collect::<Vec<_>>();
-            let mount = fields
-                .get(4)?
-                .replace("\\040", " ")
-                .replace("\\011", "\t")
-                .replace("\\012", "\n")
-                .replace("\\134", "\\");
-            let mount = PathBuf::from(mount);
-            path.starts_with(&mount).then(|| {
-                (
-                    mount.as_os_str().len(),
-                    fields
-                        .get(5)
-                        .is_some_and(|options| options.split(',').any(|flag| flag == "noexec")),
-                )
-            })
+/// Upstream challenges: random prompts asking for 292–332 distinct-length answers.
+pub fn challenges(count: u32) -> Result<Vec<Challenge>, PluginFault> {
+    lmfpd::generate_challenges(count as usize)
+        .map_err(|e| fault(format!("挑战生成失败：{e}")))
+        .map(|list| {
+            list.into_iter()
+                .map(|c| Challenge {
+                    id: c.id,
+                    prompt: c.prompt,
+                    expected_count: c.expected_count as u32,
+                })
+                .collect()
         })
-        .max_by_key(|(length, _)| *length)
-        .is_some_and(|(_, noexec)| noexec)
+}
+
+/// Accepts one reply like upstream relaxed sampling: numbers beyond the requested count are cut, fewer than
+/// `max(80, ceil(0.55 × count))` are rejected. A partial (interrupted) reply drops a trailing digit run that may
+/// belong to an unfinished number.
+pub fn sample(text: &str, expected_count: u32, partial: bool) -> Result<Vec<u32>, PluginFault> {
+    if text.len() > MAX_TEXT {
+        return Err(fault("回答过大"));
+    }
+    let text = if partial {
+        text.trim_end_matches(|c: char| c.is_ascii_digit())
+    } else {
+        text
+    };
+    let mut numbers = lmfpd::parse_numbers(text);
+    numbers.truncate(expected_count as usize);
+    let minimum = lmfpd::minimum_numbers(u64::from(expected_count));
+    if (numbers.len() as u64) < minimum {
+        return Err(fault(format!(
+            "有效数字不足（{}，至少{minimum}）",
+            numbers.len()
+        )));
+    }
+    Ok(numbers)
+}
+
+/// Scores one round of accepted samples with the upstream round scoring.
+pub fn score(detector: &Detector, samples: &[Sample]) -> Result<Score, PluginFault> {
+    if !(1..=3).contains(&samples.len()) {
+        return Err(fault("每轮评分需要1至3个有效样本"));
+    }
+    let input: Vec<(Vec<u32>, u64)> = samples
+        .iter()
+        .map(|s| (s.numbers.clone(), u64::from(s.expected_count)))
+        .collect();
+    let analysis = detector
+        .score(&input)
+        .map_err(|e| fault(format!("评分失败：{e}")))?;
+    let results: Vec<Candidate> = analysis
+        .results
+        .iter()
+        .map(|r| Candidate {
+            model: r.model.clone(),
+            label: r.display_name.clone(),
+            family: r.family.clone(),
+            probability: r.probability,
+            score: Some(r.score),
+        })
+        .collect();
+    // Family totals are only a display aggregate of the calibrated candidate probabilities.
+    let mut families: Vec<Family> = vec![];
+    if analysis.probability.is_some() {
+        let mut totals: BTreeMap<&str, (String, f64)> = BTreeMap::new();
+        for r in &analysis.results {
+            let entry = totals
+                .entry(r.family.as_str())
+                .or_insert_with(|| (r.family_name.clone(), 0.0));
+            entry.1 += r.probability.unwrap_or(0.0);
+        }
+        families = totals
+            .into_iter()
+            .map(|(family, (name, probability))| Family {
+                family: family.into(),
+                display_name: name,
+                probability,
+            })
+            .collect();
+        families.sort_by(|a, b| b.probability.total_cmp(&a.probability));
+    }
+    let decision = match analysis.decision {
+        Decision::Scored => "scored",
+        Decision::Partial => "partial",
+        Decision::Unscorable => "unscorable",
+        Decision::NotModel => "not_model",
+    };
+    Ok(Score {
+        prediction: analysis.prediction,
+        probability: analysis.probability,
+        results,
+        families: serde_json::to_value(families).unwrap(),
+        decision: Some(decision.into()),
+        ranking_score: analysis.ranking_score,
+        used_outputs: Some(analysis.used_outputs as u32),
+        method: Some(analysis.method),
+        reason: Some(analysis.evidence.reason),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
-    fn archive(kind: tar::EntryType) -> Vec<u8> {
-        let mut builder = tar::Builder::new(Vec::new());
-        let mut header = tar::Header::new_gnu();
-        header.set_entry_type(kind);
-        header.set_path("engine/worker.py").unwrap();
-        header.set_size(0);
-        header.set_mode(0o755);
-        header.set_mtime(1);
-        if kind.is_symlink() {
-            header.set_link_name("/outside").unwrap();
-        }
-        header.set_cksum();
-        builder.append(&header, std::io::empty()).unwrap();
-        let data = builder.into_inner().unwrap();
-        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        gzip.write_all(&data).unwrap();
-        gzip.finish().unwrap()
+    fn detector() -> Detector {
+        Detector::decode(crate::banks::builtin_bytes()).unwrap()
     }
 
     #[test]
-    fn extraction_keeps_executable_mode_without_restoring_mtime() {
-        use std::os::unix::fs::PermissionsExt;
-        let directory = tempfile::tempdir().unwrap();
-        unpack(
-            archive(tar::EntryType::Regular).as_slice(),
-            directory.path(),
-        )
-        .unwrap();
-        let metadata = std::fs::metadata(directory.path().join("engine/worker.py")).unwrap();
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o755);
-        assert_ne!(
-            metadata.modified().unwrap(),
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)
-        );
+    fn builtin_bank_decodes_with_calibration() {
+        let d = detector();
+        assert!(d.calibrated());
+        assert!(d.models().len() >= 2);
     }
 
     #[test]
-    fn extraction_error_names_entry_and_preserves_os_cause() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("engine"), "blocking file").unwrap();
-        let error = unpack(
-            archive(tar::EntryType::Regular).as_slice(),
-            directory.path(),
-        )
-        .unwrap_err();
-        assert!(error.message.contains("engine/worker.py"));
-        assert!(error.message.contains("os error"));
-        assert!(error.message.contains("TMPDIR"));
+    fn sample_caps_and_rejects_like_upstream() {
+        let text = (0..320)
+            .map(|i| ((i * 37 + 11) % 355 + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(sample(&text, 300, false).unwrap().len(), 300);
+        assert!(sample("1, 2, 3", 300, false).is_err());
+        // A partial reply drops the unfinished trailing run.
+        let partial = format!("{text}, 3");
+        assert_eq!(sample(&partial, 330, true).unwrap().len(), 320);
     }
 
     #[test]
-    fn extraction_still_rejects_symlinks() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(
-            unpack(
-                archive(tar::EntryType::Symlink).as_slice(),
-                directory.path()
-            )
-            .is_err()
-        );
-        assert!(!directory.path().join("engine/worker.py").exists());
-    }
-
-    #[test]
-    fn mount_check_uses_deepest_matching_mount_and_decodes_paths() {
-        let mounts = "1 0 0:1 / / rw - overlay overlay rw\n2 1 0:2 / /limited rw,noexec - tmpfs tmpfs rw\n3 2 0:3 / /limited/allowed rw - tmpfs tmpfs rw\n4 1 0:4 / /with\\040space rw,noexec - tmpfs tmpfs rw";
-        assert!(mount_disallows_execution(Path::new("/limited/run"), mounts));
-        assert!(!mount_disallows_execution(
-            Path::new("/limited/allowed/run"),
-            mounts
-        ));
-        assert!(!mount_disallows_execution(
-            Path::new("/limited-other"),
-            mounts
-        ));
-        assert!(mount_disallows_execution(
-            Path::new("/with space/run"),
-            mounts
-        ));
+    fn upstream_conformance_scores_match() {
+        // Cases from upstream sdk/conformance/analyze.json evaluated against the bundled data must
+        // at least produce a finite ranking for one and three samples.
+        let d = detector();
+        let numbers: Vec<u32> = [
+            47, 203, 12, 289, 156, 84, 231, 19, 312, 105, 248, 73, 167, 326, 41, 198, 82, 264, 137,
+            355, 29, 214, 91, 172, 303, 118, 256, 68, 185, 339, 34, 227, 142, 301, 77, 210, 163,
+            49, 274, 120, 8, 293, 151, 236, 63, 318, 97, 181, 245, 25, 132, 284, 59, 207, 344, 113,
+            176, 38, 262, 88, 221, 147, 309, 71, 195, 252, 16, 128, 280, 102, 239, 55, 333, 160,
+            217, 93, 271, 44, 189, 124, 297, 66, 234, 109, 348, 179, 22, 258, 140, 315, 86, 201,
+        ]
+        .into_iter()
+        .collect();
+        let s = Sample {
+            numbers,
+            expected_count: 150,
+        };
+        let one = score(&d, std::slice::from_ref(&s)).unwrap();
+        assert_eq!(one.decision.as_deref(), Some("partial"));
+        assert!(one.probability.is_none());
+        assert!(!one.results.is_empty());
+        let three = score(&d, &[s.clone(), s.clone(), s]).unwrap();
+        assert_eq!(three.decision.as_deref(), Some("scored"));
+        let p = three.probability.unwrap();
+        assert!((0.0..=1.0).contains(&p));
+        let total: f64 = three.results.iter().map(|r| r.probability.unwrap()).sum();
+        assert!((total - 1.0).abs() < 1e-9);
     }
 }

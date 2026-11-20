@@ -1,6 +1,6 @@
 [package]
 name = "modeltrace-health"
-version = "1.28.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.99.1"
 license = "MIT"
@@ -20,6 +20,9 @@ tempfile = "3.27.0"
 sha2 = "0.10.9"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+regex = "1.13.1"
+ruzstd = "0.9.1"
+getrandom = "0.4.3"
 
 [lints.rust]
 unsafe_code = "forbid"

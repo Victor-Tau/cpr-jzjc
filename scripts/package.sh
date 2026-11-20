@@ -12,10 +12,7 @@ pnpm --dir frontend build
 cargo fmt --manifest-path backend/Cargo.toml --check
 cargo test --manifest-path backend/Cargo.toml --locked
 cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
-python3 -m unittest discover -s engine/tests -v
-python3 -m unittest discover -s scripts/tests -v
 node scripts/api_smoke.mjs
-python3 scripts/build_runtime.py --target "$target" --cache-dir ".cache/runtime/$target" "$@"
 python3 scripts/collect_licenses.py
 if command -v cargo-zigbuild >/dev/null 2>&1; then
   cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target "${target}.2.36"

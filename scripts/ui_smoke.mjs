@@ -8,6 +8,8 @@ const root=resolve(import.meta.dirname,'..')
 // UI_DIST / UI_SHOTS let parallel builds run side by side without sharing frontend/dist.
 const dist=resolve(root,process.env.UI_DIST||'frontend/dist'),shots=resolve(root,process.env.UI_SHOTS||'.cache')
 const fixture=JSON.parse(await readFile(resolve(root,'.cache/ui-fixture.json'),'utf8'))
+// Expected top candidate comes from the fixture: it is whatever lm-detector scored for the mock reply.
+const topScore=fixture.report.rounds[0].score,topModel=topScore.prediction.replace(/[.]/g,'\\.'),topPercent=`${(topScore.probability*100).toFixed(1)}%`.replace('.','\\.')
 fixture.themes=Object.fromEntries(['light','dark'].map(name=>[name,createThemeVars(createTheme({scheme:name}).tokens)]))
 const browser=await chromium.launch({headless:true,args:['--no-sandbox']})
 try {
@@ -59,7 +61,7 @@ try {
   const testedRow=page.locator('tbody tr').filter({hasText:'user@example.com'})
   assert.equal(await testedRow.getByText('未降智',{exact:true}).count(),1)
   assert.equal(await testedRow.locator('.live-progress').count(),0)
-  assert.match(await testedRow.locator('.cand-inline').innerText(),/gpt-5\.6-terra\s+98\.9%/)
+  assert.match(await testedRow.locator('.cand-inline').innerText(),new RegExp(`${topModel}\\s+${topPercent}`))
   assert.match(await testedRow.locator('.cell-time').getAttribute('title'),/\d{4}\/\d{1,2}\/\d{1,2} \d{2}:\d{2}:\d{2}/)
   assert.equal(await testedRow.locator('.detection-source').innerText(),'手动')
   // Request-log trigger status follows bootstrap and every progress poll.
@@ -318,7 +320,7 @@ try {
   assert.equal(await reportDialog.locator('.rpt-who .src-pill').innerText(),'日志触发 503')
   assert.equal(await reportDialog.locator('.rpt-verdict .pill').innerText(),'未降智')
   assert.equal(await reportDialog.locator('.rpt-status').count(),0)
-  assert.match((await reportDialog.locator('.rpt-verdict').innerText()).replace(/\s+/g,' '),/最高候选 gpt-5\.6-terra 概率 98\.9%/)
+  assert.match((await reportDialog.locator('.rpt-verdict').innerText()).replace(/\s+/g,' '),new RegExp(`最高候选 ${topModel} 置信度 ${topPercent}`))
   assert.match(await reportDialog.locator('.prob-row.degraded').innerText(),/gpt-5\.6-luna/)
   const modelCount=await page.evaluate(()=>window.__fixture.report.rounds[0].score.results.length)
   assert.equal(await reportDialog.locator('.prob-row').count(),9)
@@ -470,7 +472,7 @@ try {
   await page.getByRole('status').filter({hasText:'宿主调用预算超时；等待重试'}).last().waitFor({timeout:2500})
   assert(await page.evaluate(()=>window.__calls.filter(c=>c.path==='api/report').length)>reportsBeforeRetry)
   assert.match(await page.getByRole('status').filter({hasText:'宿主调用预算超时；等待重试'}).last().innerText(),/本轮已尝试 1\/5 次/)
-  await page.getByText('请求记录（2）',{exact:true}).click()
+  await page.getByText(`请求记录（${fixture.report.attempts.length+1}）`,{exact:true}).click()
   await page.getByText('耗时 28.0 秒 · 正文 0.5 KB · 流数据 2.0 KB',{exact:false}).waitFor()
   await page.evaluate(()=>{
     const f=window.__fixture
