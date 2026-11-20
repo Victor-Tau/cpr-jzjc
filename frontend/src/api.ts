@@ -66,6 +66,7 @@ export const api = {
   deleteMany: (ids: string[]) => request<{ deleted: number; skipped: number }>('POST', 'api/delete', { ids }),
   retryDisable: (id: string) => request('POST', 'api/retry-disable', { id }),
   retryGroup: (id: string) => request('POST', 'api/retry-group', { id }),
+  moveNormal: (accountId: string) => request<{ moved: boolean }>('POST', 'api/move-normal', { accountId }),
   bank: (operation: 'check' | 'apply' | 'rollback' | 'builtin') => request<Banks>('POST', `api/banks/${operation}`, {}),
 }
 export const date = (value: number | string | null | undefined) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'

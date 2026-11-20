@@ -831,15 +831,58 @@ impl Manager {
         Ok(ident)
     }
     async fn validate_target_group(host: &HostClient, config: &Config) -> Result<(), PluginFault> {
-        if config.auto_move_group
-            && !host::groups(host)
-                .await?
-                .iter()
-                .any(|g| g.id == config.target_group_id)
-        {
+        if !config.auto_move_group && config.normal_group_id.is_empty() {
+            return Ok(());
+        }
+        let groups = host::groups(host).await?;
+        if config.auto_move_group && !groups.iter().any(|g| g.id == config.target_group_id) {
             return Err(fault("降智目标分组不存在，请重新选择"));
         }
+        if !config.normal_group_id.is_empty()
+            && !groups.iter().any(|g| g.id == config.normal_group_id)
+        {
+            return Err(fault("正常分组不存在，请重新选择"));
+        }
         Ok(())
+    }
+    /// "移回正常": replaces the account's groups with the configured normal group. Only memberships change;
+    /// scheduling (enabled) is left as is.
+    pub async fn move_to_normal(
+        &mut self,
+        host: &HostClient,
+        account_id: &str,
+    ) -> Result<bool, PluginFault> {
+        let group = self.control.config.normal_group_id.clone();
+        if group.is_empty() {
+            return Err(fault("请先在参数配置中选择正常分组"));
+        }
+        if self
+            .jobs
+            .iter()
+            .any(|(j, _)| j.account_id == account_id && (j.active() || j.actions_pending()))
+        {
+            return Err(fault("该账户正在检测或处理中，请稍后再移回正常"));
+        }
+        let target = vec![group];
+        if host::account_groups(host, account_id).await? == target {
+            return Ok(false);
+        }
+        Self::validate_target_group(host, &self.control.config).await?;
+        let a = host::runtime(host, account_id).await?;
+        if a.account_id != account_id || a.provider_id != "openai" {
+            return Err(fault("账户不存在或提供方不受支持"));
+        }
+        host::admin(
+            host,
+            "POST",
+            "/api/admin/accounts/batch-update",
+            Some(json!({"accountIds":[account_id],"groupIds":target})),
+        )
+        .await?;
+        if host::account_groups(host, account_id).await? != target {
+            return Err(fault("移回正常分组后校验未通过"));
+        }
+        Ok(true)
     }
     // Disabled accounts remain eligible for moving: both actions can be enabled.
     async fn action_account(host: &HostClient, job: &Job) -> Result<bool, PluginFault> {

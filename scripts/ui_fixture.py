@@ -18,6 +18,7 @@ def main():
         initial = host.request("api/bootstrap")
         display_config = copy.deepcopy(initial["config"])
         display_config["keyId"] = "key-test"
+        display_config["normalGroupId"] = "group-test"
         display_config["schedule"].update(enabled=True, kind="interval", intervalMinutes=30)
         sample_config = copy.deepcopy(display_config)
         sample_config.update(lowConfidencePercent=0, degradedPercent=0, retryDelaySeconds=0, challengesPerRound=3,

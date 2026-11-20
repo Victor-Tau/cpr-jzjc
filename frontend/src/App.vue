@@ -128,7 +128,7 @@ watch(filtered, a => { page.value=Math.min(page.value,Math.max(1,Math.ceil(a.len
 watch(history, a => { historyPage.value=Math.min(historyPage.value,Math.max(1,Math.ceil(a.length/historySize.value))) })
 watch(() => report.value?.id, () => { showAllModels.value=false })
 
-const columns: TableColumn<Account>[] = [{key:'select',label:'',kind:'selection',width:48},{key:'identity',label:'账户',kind:'identity',minWidth:250},{key:'plan',label:'订阅',kind:'custom',width:90},{key:'groups',label:'分组',kind:'custom',minWidth:140},{key:'status',label:'账户状态',kind:'custom',width:108},{key:'result',label:'检测结果',kind:'custom',minWidth:280},{key:'time',label:'检测时间',kind:'custom',width:150},{key:'actions',label:'操作',kind:'actions',width:132}]
+const columns: TableColumn<Account>[] = [{key:'select',label:'',kind:'selection',width:48},{key:'identity',label:'账户',kind:'identity',minWidth:250},{key:'plan',label:'订阅',kind:'custom',width:90},{key:'groups',label:'分组',kind:'custom',minWidth:140},{key:'status',label:'账户状态',kind:'custom',width:108},{key:'result',label:'检测结果',kind:'custom',minWidth:280},{key:'time',label:'检测时间',kind:'custom',width:150},{key:'actions',label:'操作',kind:'actions',width:212}]
 const historyColumns: TableColumn<Job>[] = [{key:'select',label:'',kind:'selection',width:48},{key:'account',label:'账户',kind:'identity',minWidth:230},{key:'result',label:'结论',kind:'custom',minWidth:240},{key:'model',label:'最高候选',kind:'custom',minWidth:200},{key:'createdAt',label:'检测时间',kind:'custom',width:150},{key:'actions',label:'操作',kind:'actions',width:132}]
 
 function selectOne(id:string,checked:boolean) { selected.value=checked ? Array.from(new Set([...selected.value,id])) : selected.value.filter(x => x !== id) }
@@ -188,7 +188,7 @@ const snapshot = computed(() => {
     ['请求模型', c.requestModel], ['推理强度', c.reasoningEffort || '默认'], ['温度', c.temperature ?? '默认'], ['最大输出', `${c.maxOutputTokens} tokens`],
     ['失败后重试', `${c.failureRetries} 次`], ['请求被拒绝后', c.requestRejectedAction==='disable' ? '停止账户调度' : '保留调度，下次继续检测'],
     ['单次请求超时', `${c.timeoutSeconds} 秒`], ['降智判定阈值', `${c.degradedPercent}%`], ['低置信度阈值', `${c.lowConfidencePercent}%`], ['连续确认轮数', `${c.confirmationRounds} 轮`],
-    ['低置信度复测', `${c.lowConfidenceRetries} 次`], ['每轮挑战数', `${c.challengesPerRound ?? 1} 个`], ['降智模型', c.degradedModels?.join('、') || '—'], ['检测器版本', r.bankCommit?.slice(0,12) || '—'], ['lm-detector 提交', r.engineCommit?.slice(0,12) || '—'],
+    ['低置信度复测', `${c.lowConfidenceRetries} 次`], ['每轮挑战数', `${c.challengesPerRound ?? 1} 个`], ['判定规则', c.degradeRule === 'target_mismatch' ? '与目标模型不匹配' : '出现降级模型'], ['降智模型', c.degradedModels?.join('、') || '—'], ['检测器版本', r.bankCommit?.slice(0,12) || '—'], ['lm-detector 提交', r.engineCommit?.slice(0,12) || '—'],
   ] as [string, string | number][]
 })
 const confirmAccounts = computed(() => confirmIds.value.map(id => accounts.value.find(a => a.id === id)).map(a => a ? a.email || a.name : ''))
@@ -243,6 +243,9 @@ async function remove(id:string) { await action(async () => { await api.delete(i
 function openDelete(ids:string[]) { deleteIds.value=ids; deleteOpen.value=true }
 async function removeSelected() { await action(async () => { const ids=deleteIds.value; const r=await api.deleteMany(ids); deleteOpen.value=false; historySelected.value=historySelected.value.filter(id=>!ids.includes(id)); await refreshJobs(); notice.value=`已删除 ${r.deleted} 条检测记录${r.skipped ? `，${r.skipped} 条正在执行或处理操作已跳过` : ''}。` }) }
 async function retryDisable(id:string) { await action(async () => { await api.retryDisable(id); await refreshJobs(); await loadAccounts(); if(report.value?.id===id) report.value=await api.report(id) }) }
+const normalGroupName = computed(() => allGroups.value.find(g => g.id === config.value?.normalGroupId)?.name || config.value?.normalGroupId || '')
+const inNormal = (a: Account) => a.groups.length === 1 && a.groups[0]!.id === config.value?.normalGroupId
+async function moveNormal(a: Account) { await action(async () => { const r=await api.moveNormal(a.id); await loadAccounts(); notice.value = r.moved ? `已将 ${a.email || a.name} 移回正常分组「${normalGroupName.value}」。` : `${a.email || a.name} 已在正常分组。` }) }
 async function retryGroup(id:string) { await action(async () => { await api.retryGroup(id); await refreshJobs(); await loadAccounts(); if(report.value?.id===id) report.value=await api.report(id) }) }
 onMounted(async () => { document.addEventListener('visibilitychange',visibilityChanged); clockTimer=setInterval(()=>{clock.value=Date.now()},1000); await load(); schedulePoll(0) })
 onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer) clearInterval(clockTimer); document.removeEventListener('visibilitychange',visibilityChanged) })
@@ -351,7 +354,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
             </div>
             <span v-else class="cell-empty">—</span>
           </template>
-          <template #actions="{row}"><div class="row-actions"><ZButton size="small" :disabled="!canDetect(row) || busy" @click="openSubmit([row.id])">检测</ZButton><ZButton v-if="jobOf(row)" size="small" variant="text" :disabled="busy" @click="openReport(jobOf(row)!.id)">报告</ZButton></div></template>
+          <template #actions="{row}"><div class="row-actions"><ZButton size="small" :disabled="!canDetect(row) || busy" @click="openSubmit([row.id])">检测</ZButton><ZButton v-if="config?.normalGroupId" size="small" :disabled="busy || inNormal(row) || active(jobOf(row))" :title="inNormal(row) ? '已在正常分组' : `移入分组：${normalGroupName}`" @click="moveNormal(row)">移回正常</ZButton><ZButton v-if="jobOf(row)" size="small" variant="text" :disabled="busy" @click="openReport(jobOf(row)!.id)">报告</ZButton></div></template>
         </ZTable>
         <div class="list-footer"><ZPagination v-model:current-page="page" v-model:page-size="pageSize" :total="filtered.length" :page-sizes="[10,20,50,100]" /></div>
       </section>

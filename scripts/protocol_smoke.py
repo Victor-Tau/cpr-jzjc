@@ -950,6 +950,33 @@ class Integration(unittest.TestCase):
         failed=self.host.request('api/banks/check',{});self.assertIsNotNone(failed['update']['error']);self.assertEqual(failed['active']['hash'],old)
         self.host.bank=(LMFPD/"bundle.json").read_bytes();mutate_bank(self.host,rename=('gpt-5.6-luna','gpt-5.6-luna-renamed'));self.host.request('api/banks/check',{})
         conflict=self.host.request('api/banks/apply',{},ok=False);self.assertIn('gpt-5.6-luna',conflict['error']['message']);self.assertEqual(self.host.request('api/bootstrap')['banks']['active']['hash'],old)
+    def test_move_normal_replaces_groups_without_touching_scheduling(self):
+        self.host.request('api/move-normal',{'accountId':'acct-test'},ok=False)  # no normal group configured
+        b=self.host.request('api/bootstrap');c=b['config'];c.update(keyId='key-test',normalGroupId='missing-group')
+        bad=self.host.request('api/config',{'config':c,'revision':b['configRevision']},ok=False)
+        self.assertIn('正常分组不存在',bad['error']['message'])
+        self.config(normalGroupId='group-test');self.host.memberships=['group-degraded']
+        self.assertTrue(self.host.request('api/move-normal',{'accountId':'acct-test'})['moved'])
+        self.assertEqual(self.host.memberships,['group-test'])
+        self.assertEqual(self.host.updates[-1],{'accountIds':['acct-test'],'groupIds':['group-test']})
+        self.assertTrue(self.host.enabled);self.assertEqual(self.host.disable_calls,0)
+        updates=len(self.host.updates)
+        self.assertFalse(self.host.request('api/move-normal',{'accountId':'acct-test'})['moved'])
+        self.assertEqual(len(self.host.updates),updates)
+        # An account under detection is not moved.
+        self.host.memberships=['group-degraded'];self.submit()
+        busy=self.host.request('api/move-normal',{'accountId':'acct-test'},ok=False)
+        self.assertIn('正在检测',busy['error']['message']);self.assertEqual(self.host.memberships,['group-degraded'])
+    def test_target_mismatch_rule(self):
+        b=self.host.request('api/bootstrap');c=b['config'];c.update(keyId='key-test',degradeRule='target_mismatch',degradedModels=[])
+        bad=self.host.request('api/config',{'config':c,'revision':b['configRevision']},ok=False)
+        self.assertIn('不在库中',bad['error']['message'])
+        self.config(degradeRule='target_mismatch',degradedModels=[],aliases={'gpt-6.1-sol':'gpt-6-sol'},lowConfidencePercent=0,degradedPercent=0)
+        identity=self.submit();self.host.tick()
+        report=self.host.request('api/report?id='+identity)
+        top=report['rounds'][0]['score']['prediction']
+        self.assertEqual(report['verdict'],'no_match' if top=='gpt-6-sol' else 'degraded',top)
+        self.assertEqual(report['config']['degradeRule'],'target_mismatch')
     def test_identity_change_stops_samples(self):
         self.config(autoDisable=True,lowConfidencePercent=100,degradedPercent=100);identity=self.submit();self.host.tick();self.host.identity='changed';self.host.tick()
         self.assertEqual(self.host.request('api/report?id='+identity)['status'],'failed');self.assertEqual(len(self.host.executions),1);self.assertEqual(self.host.disable_calls,0)

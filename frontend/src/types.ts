@@ -1,7 +1,7 @@
 export interface Filter { plan: string; plans: string[]; status: string; group: string; keyword: string }
 export interface Config {
   requestModel: string; keyId: string; temperature: number | null; reasoningEffort: string; maxOutputTokens: number; timeoutSeconds: number;
-  degradedModels: string[]; triggerErrorCodes: number[]; triggerCooldownMinutes: number; aliases: Record<string, string>; lowConfidencePercent: number; degradedPercent: number; confirmationRounds: number;
+  degradedModels: string[]; degradeRule: 'degraded_model' | 'target_mismatch'; normalGroupId: string; triggerErrorCodes: number[]; triggerCooldownMinutes: number; aliases: Record<string, string>; lowConfidencePercent: number; degradedPercent: number; confirmationRounds: number;
   lowConfidenceRetries: number; failureRetries: number; requestRejectedAction: 'continue' | 'disable'; retryDelaySeconds: number; autoDisable: boolean; autoMoveGroup: boolean; targetGroupId: string; retentionDays: number; retentionPerAccount: number;
   schedule: { enabled: boolean; kind: string; intervalMinutes: number; time: string; timezone: string; scope: string; accountIds: string[]; filter: Filter };
   autoCheckUpdates: boolean; updateIntervalHours: number; mirrorPrefix: string; maxConcurrency: number; challengesPerRound: number;

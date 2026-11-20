@@ -57,6 +57,7 @@ fn registration() -> ManagementRegistration {
         ("POST", "api/delete"),
         ("POST", "api/retry-disable"),
         ("POST", "api/retry-group"),
+        ("POST", "api/move-normal"),
         ("POST", "api/banks/check"),
         ("POST", "api/banks/apply"),
         ("POST", "api/banks/rollback"),
@@ -224,6 +225,14 @@ async fn handle(
                 .ok_or_else(|| host::fault("没有可重试的移组操作"))?;
             m.move_group(h, i).await?;
             Ok(json!({"ok":true}))
+        }
+        ("POST", "api/move-normal") => {
+            let id = body["accountId"].as_str().unwrap_or("");
+            if id.is_empty() || id.len() > 128 {
+                return Err(host::fault("账户ID无效"));
+            }
+            let moved = m.move_to_normal(h, id).await?;
+            Ok(json!({"moved":moved}))
         }
         ("POST", "api/banks/check") => {
             m.check_update(h).await?;
