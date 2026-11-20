@@ -36,11 +36,17 @@ def split_detector(data):
 def join_detector(header,planes):
     h=raw(header);out=struct.pack('<I',len(h))+h
     return out+b' '*((-len(out))%4)+planes
-_ZSTD={}
 def zstd(data):
-    key=hashlib.sha256(data).hexdigest()
-    if key not in _ZSTD:_ZSTD[key]=subprocess.run(['zstd','-1','-q','-c'],input=data,capture_output=True,check=True).stdout
-    return _ZSTD[key]
+    """A valid zstd frame made of raw blocks: no system zstd tool needed, and the plugin's real decoder runs."""
+    out=bytearray(b'\x28\xb5\x2f\xfd')  # magic
+    out+=bytes([0xe0])  # frame header: 8-byte content size + single segment (no window byte), no checksum/dictionary
+    out+=struct.pack('<Q',len(data))
+    step=128*1024-1
+    chunks=[data[i:i+step] for i in range(0,len(data),step)] or [b'']
+    for index,chunk in enumerate(chunks):
+        header=(len(chunk)<<3)|(0<<1)|(1 if index==len(chunks)-1 else 0)  # raw block, last flag
+        out+=header.to_bytes(3,'little')+chunk
+    return bytes(out)
 def mutate_bank(host,built_at=None,rename=None):
     """Make a consistent new data version: bundle.json and the detector header must agree."""
     bundle=json.loads(host.bank);header,planes=split_detector(host.detector)

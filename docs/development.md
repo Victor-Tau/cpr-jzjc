@@ -25,7 +25,6 @@
 | Node.js / pnpm | Node.js >=24、pnpm 9.12.2，使用前端锁文件安装依赖 |
 | Python | >=3.11.4，仅用于验证脚本（标准库）；CI 使用 3.11.17 |
 | Zig / cargo-zigbuild | 构建 glibc 2.36 目标的发布二进制；也可在匹配架构、glibc <=2.36 的 Linux 环境启用原生构建 |
-| zstd | RPC 回归模拟 lm-detector 数据源时压缩检测器分片 |
 | cpr-plugin | `scripts/install_packager.py` 自动使用 `backend/Cargo.toml` 中 SDK 的固定提交安装 |
 
 ```bash
