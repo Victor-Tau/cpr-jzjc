@@ -20,12 +20,12 @@ def main():
         display_config["keyId"] = "key-test"
         display_config["schedule"].update(enabled=True, kind="interval", intervalMinutes=30)
         sample_config = copy.deepcopy(display_config)
-        sample_config.update(lowConfidencePercent=0, degradedPercent=0, retryDelaySeconds=0,
+        sample_config.update(lowConfidencePercent=0, degradedPercent=0, retryDelaySeconds=0, challengesPerRound=3,
                              aliases={sample_config['requestModel']: 'gpt-5.6-luna'})
         sample_config["schedule"]["enabled"] = False
         host.request("api/config", {"config": sample_config, "revision": initial["configRevision"]})
         job = host.request("api/submit", {"accountIds": ["acct-test"], "requestId": "ui-fixture"})["submitted"][0]
-        host.tick(2)
+        host.tick(4)  # three challenges per round
         bootstrap = host.request("api/bootstrap")
         bootstrap["config"] = display_config
         bootstrap["nextDue"] = int(time.time() * 1000) + 29 * 60 * 1000

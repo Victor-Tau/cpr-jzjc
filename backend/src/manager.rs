@@ -93,7 +93,6 @@ pub struct Manager {
     deadline: Option<tokio::time::Instant>,
     request_window: std::time::Duration,
     last_job_source: Option<String>,
-    score_bank: Option<(String, std::path::PathBuf)>,
     /// Host instance ID, used to ignore this plugin's own probe failures.
     pub instance_id: String,
 }
@@ -110,7 +109,6 @@ impl Manager {
             deadline: None,
             request_window: std::time::Duration::ZERO,
             last_job_source: None,
-            score_bank: None,
             instance_id: String::new(),
         }
     }
@@ -218,6 +216,7 @@ impl Manager {
             }
         }
         self.control.job_ids = self.jobs.iter().map(|(j, _)| j.id.clone()).collect();
+        self.migrate_banks(host).await?;
         if let Some(p) = self.control.pending_bank.take()
             && !self.control.banks.iter().any(|b| b.hash == p.hash)
         {
@@ -226,6 +225,84 @@ impl Manager {
         self.control.pending_schedule = None;
         self.save(host).await?;
         self.loaded = true;
+        Ok(())
+    }
+    /// Drops fingerprint banks of the former ModelTrace engine: they cannot be scored by lm-detector. Active jobs that
+    /// still reference one are ended, and model names that no longer exist are removed from the configuration.
+    async fn migrate_banks(&mut self, host: &HostClient) -> Result<(), PluginFault> {
+        let builtin = banks::builtin();
+        let stale: Vec<Bank> = self
+            .control
+            .banks
+            .iter()
+            .filter(|b| b.format != banks::FORMAT)
+            .cloned()
+            .collect();
+        let missing_builtin = !self.control.banks.iter().any(|b| b.hash == builtin.hash);
+        if stale.is_empty() && !missing_builtin {
+            return Ok(());
+        }
+        for b in &stale {
+            banks::remove(host, b).await?;
+        }
+        self.control.banks.retain(|b| b.format == banks::FORMAT);
+        if missing_builtin {
+            self.control.banks.insert(0, builtin.clone());
+        }
+        let known = |hash: &str, banks: &[Bank]| banks.iter().any(|b| b.hash == hash);
+        if !known(&self.control.active_bank, &self.control.banks) {
+            self.control.active_bank = builtin.hash.clone();
+        }
+        if self
+            .control
+            .previous_bank
+            .as_ref()
+            .is_some_and(|h| !known(h, &self.control.banks))
+        {
+            self.control.previous_bank = None;
+        }
+        if self
+            .control
+            .update
+            .available
+            .as_ref()
+            .is_some_and(|b| b.format != banks::FORMAT)
+        {
+            self.control.update = Update::default();
+        }
+        let ids: Vec<String> = self
+            .active_bank()
+            .models
+            .iter()
+            .map(|m| m.id.clone())
+            .collect();
+        let cfg = &mut self.control.config;
+        cfg.degraded_models.retain(|m| ids.contains(m));
+        if cfg.degraded_models.is_empty() {
+            cfg.degraded_models = Config::default()
+                .degraded_models
+                .into_iter()
+                .filter(|m| ids.contains(m))
+                .collect();
+        }
+        cfg.aliases.retain(|_, v| ids.contains(v));
+        self.control.config_revision += 1;
+        for i in 0..self.jobs.len() {
+            let j = &mut self.jobs[i].0;
+            if j.active()
+                && j.bank_hash
+                    .as_ref()
+                    .is_some_and(|h| !known(h, &self.control.banks))
+            {
+                j.finish(
+                    "interrupted",
+                    "inconclusive",
+                    "评分内核已升级为 lm-detector，请重新检测",
+                    now(),
+                );
+                self.save_job(host, i).await?;
+            }
+        }
         Ok(())
     }
     /// Clears execution boundaries left behind by an RPC cancellation. A probe
@@ -288,25 +365,18 @@ impl Manager {
     pub fn summaries(&self) -> Vec<Value> {
         self.jobs.iter().rev().map(|(j,_)|json!({"id":j.id,"accountId":j.account_id,"accountName":j.account_name,"source":j.source,"status":j.status,"verdict":j.verdict,"message":j.message,"createdAt":j.created_at,"finishedAt":j.finished_at,"roundCount":j.rounds.len(),"sampleCount":j.samples.len(),"consecutive":j.consecutive,"roundAttempts":j.round_attempts,"attemptLimit":j.config.failure_retries.saturating_add(1),"attemptCount":j.attempts.len(),"nextAt":j.next_at,"prediction":j.rounds.last().map(|r|&r.score.prediction),"probability":j.rounds.last().map(|r|r.score.probability),"bankHash":j.bank_hash,"disableState":j.disable_state,"groupState":j.group_state,"triggerCode":j.trigger.as_ref().map(|t|t.code)})).collect()
     }
+    /// Decodes the job's bank into the in-process scoring cache (once per bank).
     async fn prepare_score(
         &mut self,
         host: &HostClient,
         i: usize,
-    ) -> Result<std::path::PathBuf, PluginFault> {
+    ) -> Result<Arc<crate::lmfpd::Detector>, PluginFault> {
         let bank = self.bank(self.jobs[i].0.bank_hash.as_ref().unwrap())?;
-        if let Some((hash, path)) = &self.score_bank
-            && hash == &bank.hash
-        {
-            return Ok(path.clone());
+        if let Some(detector) = self.engine.cached(&bank.hash) {
+            return Ok(detector);
         }
         let bytes = banks::read(host, &bank).await?;
-        let path = self.engine.write_bank(&bank.hash, &bytes).await?;
-        let _: Value = self
-            .engine
-            .call(json!({"op":"prepare_score","path":path}))
-            .await?;
-        self.score_bank = Some((bank.hash, path.clone()));
-        Ok(path)
+        self.engine.load(&bank.hash, &bytes)
     }
     pub async fn set_config(
         &mut self,
@@ -627,10 +697,8 @@ impl Manager {
         self.save(host).await?;
         let mirror = self.control.config.mirror_prefix.clone();
         let result = tokio::time::timeout(std::time::Duration::from_secs(24), async {
-            let sha = banks::latest(host, &mirror).await?;
-            let data = banks::download(host, &mirror, &sha).await?;
-            let bank = banks::validate(&mut self.engine, &data, sha).await?;
-            Ok::<_, PluginFault>(bank)
+            let data = banks::download(host, &mirror, None).await?;
+            banks::validate(&mut self.engine, &data)
         })
         .await
         .unwrap_or_else(|_| Err(fault("更新检查超过24秒，当前指纹库保持可用")));
@@ -672,22 +740,35 @@ impl Manager {
             .clone()
             .ok_or_else(|| fault("请先检查更新，没有待应用版本"))?;
         self.gc_banks(host).await?;
+        // A stored lm-detector bank takes about 6 MiB of the 16 MiB namespace, so only two fit. Give up the
+        // rollback copy to make room unless an active job still scores with it.
+        let stored = |m: &Self| m.control.banks.iter().filter(|b| b.chunks > 0).count();
         if !self.control.banks.iter().any(|b| b.hash == candidate.hash)
-            && self.control.banks.iter().filter(|b| b.chunks > 0).count() >= 3
+            && stored(self) >= 2
+            && self.control.previous_bank.as_ref().is_some_and(|p| {
+                !self
+                    .jobs
+                    .iter()
+                    .any(|(j, _)| j.active() && j.bank_hash.as_ref() == Some(p))
+            })
         {
+            self.control.previous_bank = None;
+            self.gc_banks(host).await?;
+        }
+        if !self.control.banks.iter().any(|b| b.hash == candidate.hash) && stored(self) >= 2 {
             return Err(fault("旧任务仍引用指纹库，待任务完成后再应用更新"));
         }
         let mirror = self.control.config.mirror_prefix.clone();
         let data = tokio::time::timeout(
             std::time::Duration::from_secs(24),
-            banks::download(host, &mirror, &candidate.commit),
+            banks::download(host, &mirror, Some(&candidate.commit)),
         )
         .await
         .map_err(|_| fault("指纹库下载超时"))??;
         if banks::hash(&data) != candidate.hash {
             return Err(fault("下载内容与检查时摘要不一致，请重新检查"));
         }
-        let mut bank = banks::validate(&mut self.engine, &data, candidate.commit).await?;
+        let mut bank = banks::validate(&mut self.engine, &data)?;
         self.control
             .config
             .validate(&bank.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>())
@@ -727,7 +808,7 @@ impl Manager {
             .validate(&bank.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>())
             .map_err(fault)?;
         let data = banks::read(host, &bank).await?;
-        banks::validate(&mut self.engine, &data, bank.commit).await?;
+        banks::validate(&mut self.engine, &data)?;
         if target != self.control.active_bank {
             self.control.previous_bank = Some(self.control.active_bank.clone());
             self.control.active_bank = target;
@@ -1005,8 +1086,7 @@ impl Manager {
                 break;
             };
             // 先恢复已落盘的回答/样本，不能为了重新采样丢弃可重放的结果。
-            if self.jobs[head].0.pending_outcome.is_some() || !self.jobs[head].0.samples.is_empty()
-            {
+            if self.jobs[head].0.pending_outcome.is_some() || self.jobs[head].0.round_ready() {
                 visited.insert(head);
                 self.last_job_source = Some(self.jobs[head].0.source.clone());
                 let result = async {
@@ -1067,7 +1147,7 @@ impl Manager {
                     .iter()
                     .position(|(j, _)| j.id == id)
                     .ok_or_else(|| fault("探针任务返回了未知任务"))?;
-                // 整批先写入原始结果；Python 校验不能阻塞其余回答的持久化。
+                // 整批先写入原始结果，再逐个校验。
                 self.record_probe(host, index, outcome).await?;
                 received.push(index);
             }
@@ -1351,7 +1431,7 @@ impl Manager {
     /// Grades the stored sample of one job. Probes never run here: a job
     /// reaches this method only with a validated sample ready for scoring.
     async fn score_ready(&mut self, host: &HostClient, i: usize) -> Result<(), PluginFault> {
-        if self.jobs[i].0.samples.len() != 1 {
+        if !self.jobs[i].0.round_ready() {
             return Ok(());
         }
         // Scoring starts only when the callback still holds a safe share of
@@ -1366,12 +1446,8 @@ impl Manager {
             .phase(&self.jobs[i].0.id, "scoring", json!({}));
         let deadline = self.deadline.unwrap() - std::time::Duration::from_millis(150);
         let scoring = async {
-            let path = self.prepare_score(host, i).await?;
-            self.engine
-                .call::<_, Score>(
-                    json!({"op":"score","path":path,"samples":self.jobs[i].0.samples}),
-                )
-                .await
+            let detector = self.prepare_score(host, i).await?;
+            crate::engine::score(&detector, &self.jobs[i].0.samples)
         };
         let score = match tokio::time::timeout_at(deadline, scoring).await {
             Ok(result) => result?,
@@ -1382,6 +1458,7 @@ impl Manager {
             }
         };
         let j = &mut self.jobs[i].0;
+        let score_unranked = score.results.is_empty();
         let verdict = j.classify(&score);
         j.rounds.push(Round {
             number: j.rounds.len() as u32 + 1,
@@ -1420,7 +1497,9 @@ impl Manager {
                         j.low_retries_used += 1;
                     }
                     j.verdict = verdict.into();
-                    j.message = if verdict == "low_confidence" {
+                    j.message = if verdict == "low_confidence" && score_unranked {
+                        "本轮未得到排名（回答不像模型输出），等待自动复测"
+                    } else if verdict == "low_confidence" {
                         "所有模型概率均低于阈值，等待自动复测"
                     } else {
                         "疑似降智，等待连续复测确认"
@@ -1482,7 +1561,8 @@ impl Manager {
         if self.jobs[i].0.challenges.is_empty() {
             self.progress
                 .phase(&self.jobs[i].0.id, "preparing", json!({}));
-            self.jobs[i].0.challenges = self.engine.call(json!({"op":"challenges"})).await?;
+            self.jobs[i].0.challenges =
+                crate::engine::challenges(self.jobs[i].0.config.challenges_per_round)?;
             self.prepare_score(host, i).await?;
             self.save_job(host, i).await?;
         }
@@ -1509,7 +1589,7 @@ impl Manager {
         self.jobs[i].0.round_attempts += 1;
         self.jobs[i].0.message = format!("第{}轮，正在检测", self.jobs[i].0.rounds.len() + 1);
         self.save_job(host, i).await?;
-        self.progress.phase(&self.jobs[i].0.id,"requesting",json!({"round":self.jobs[i].0.rounds.len()+1,"attempt":self.jobs[i].0.round_attempts,"expectedCount":challenge.expected_count}));
+        self.progress.phase(&self.jobs[i].0.id,"requesting",json!({"round":self.jobs[i].0.rounds.len()+1,"attempt":self.jobs[i].0.round_attempts,"challenge":self.jobs[i].0.samples.len()+1,"challengeCount":self.jobs[i].0.challenges.len(),"expectedCount":challenge.expected_count}));
         Ok(Some(ProbeTask {
             job: self.jobs[i].0.clone(),
             prompt: challenge.prompt,
@@ -1608,13 +1688,9 @@ impl Manager {
         self.progress
             .phase(&self.jobs[i].0.id, "validating", json!({}));
         let (numbers, error) = if let Some(text) = &outcome.text {
-            let validation = self.engine.call::<_, Vec<u32>>(
-                json!({"op":"sample","text":text,"expectedCount":outcome.expected_count}),
-            );
-            let deadline = self.deadline.unwrap() - std::time::Duration::from_millis(200);
-            match tokio::time::timeout_at(deadline, validation).await {
-                Ok(Ok(numbers)) => (Some(numbers), None),
-                Ok(Err(error)) => (
+            match crate::engine::sample(text, outcome.expected_count, outcome.diagnostics.partial) {
+                Ok(numbers) => (Some(numbers), None),
+                Err(error) => (
                     None,
                     Some(if outcome.diagnostics.partial {
                         format!("部分结果未通过样本校验：{}", error.message)
@@ -1622,11 +1698,6 @@ impl Manager {
                         error.message
                     }),
                 ),
-                Err(_) => {
-                    self.progress
-                        .phase(&self.jobs[i].0.id, "waiting_validation", json!({}));
-                    return Ok(false);
-                }
             }
         } else {
             (None, outcome.error)
@@ -1648,6 +1719,19 @@ impl Manager {
                 numbers,
                 expected_count: outcome.expected_count,
             });
+            if !j.round_ready() {
+                // More challenges in this round: each challenge has its own failure-retry budget.
+                j.round_attempts = 0;
+                j.message = format!(
+                    "第{}轮已获得 {}/{} 个有效样本，继续采样",
+                    j.rounds.len() + 1,
+                    j.samples.len(),
+                    j.challenges.len()
+                );
+                j.next_at = now();
+                self.save_probe_job(host, i).await?;
+                return Ok(false);
+            }
             j.message = if j
                 .attempts
                 .last()

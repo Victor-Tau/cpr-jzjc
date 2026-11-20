@@ -170,7 +170,14 @@ const reportTop = computed(() => {
 })
 const thresholdShown = computed(() => { const p = report.value?.config?.degradedPercent ?? 0; return p > 0 && p < 100 })
 const reportDegraded = computed(() => new Set(report.value?.config?.degradedModels ?? []))
-const sortedResults = computed(() => [...(currentRound.value?.score.results ?? [])].sort((a, b) => b.probability - a.probability))
+const sortedResults = computed(() => [...(currentRound.value?.score.results ?? [])].sort((a, b) => (b.probability ?? b.score ?? 0) - (a.probability ?? a.score ?? 0)))
+// Ranking-only rounds have no probability: scale the bar by ranking score relative to the top candidate.
+const barWidth = (r: { probability: number | null; score?: number }) => {
+  if (r.probability != null) return r.probability * 100
+  const scores = sortedResults.value.map(x => x.score ?? 0), max = Math.max(...scores), min = Math.min(...scores)
+  return max > min ? ((r.score ?? 0) - min) / (max - min) * 100 : 0
+}
+const rankingOnly = computed(() => currentRound.value != null && currentRound.value.score.probability == null)
 const TOP_MODELS = 8
 const shownResults = computed(() => showAllModels.value ? sortedResults.value : sortedResults.value.filter((r, i) => i < TOP_MODELS || reportDegraded.value.has(r.model)))
 const hiddenModels = computed(() => sortedResults.value.length - sortedResults.value.filter((r, i) => i < TOP_MODELS || reportDegraded.value.has(r.model)).length)
@@ -181,7 +188,7 @@ const snapshot = computed(() => {
     ['请求模型', c.requestModel], ['推理强度', c.reasoningEffort || '默认'], ['温度', c.temperature ?? '默认'], ['最大输出', `${c.maxOutputTokens} tokens`],
     ['失败后重试', `${c.failureRetries} 次`], ['请求被拒绝后', c.requestRejectedAction==='disable' ? '停止账户调度' : '保留调度，下次继续检测'],
     ['单次请求超时', `${c.timeoutSeconds} 秒`], ['降智判定阈值', `${c.degradedPercent}%`], ['低置信度阈值', `${c.lowConfidencePercent}%`], ['连续确认轮数', `${c.confirmationRounds} 轮`],
-    ['低置信度复测', `${c.lowConfidenceRetries} 次`], ['降智模型', c.degradedModels?.join('、') || '—'], ['指纹库提交', r.bankCommit || '—'], ['引擎提交', r.engineCommit || '—'],
+    ['低置信度复测', `${c.lowConfidenceRetries} 次`], ['每轮挑战数', `${c.challengesPerRound ?? 1} 个`], ['降智模型', c.degradedModels?.join('、') || '—'], ['检测器版本', r.bankCommit?.slice(0,12) || '—'], ['lm-detector 提交', r.engineCommit?.slice(0,12) || '—'],
   ] as [string, string | number][]
 })
 const confirmAccounts = computed(() => confirmIds.value.map(id => accounts.value.find(a => a.id === id)).map(a => a ? a.email || a.name : ''))
@@ -331,7 +338,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
             <div v-else-if="jobOf(row)" class="cell-stack">
               <div class="cell-line">
                 <span class="pill dot" :class="[`tone-${verdictTone(shownVerdict(jobOf(row)!))}`, { pulse: active(jobOf(row)) }]">{{ verdict(shownVerdict(jobOf(row)!)) }}</span>
-                <span v-if="jobOf(row)!.prediction" class="cand-inline" :class="{ 'is-degraded': degradedModels.has(jobOf(row)!.prediction!) }" :title="`最高候选 ${jobOf(row)!.prediction} · ${percent(jobOf(row)!.probability)}`"><span class="mono">{{ jobOf(row)!.prediction }}</span><b class="tabular">{{ percent(jobOf(row)!.probability) }}</b></span>
+                <span v-if="jobOf(row)!.prediction" class="cand-inline" :class="{ 'is-degraded': degradedModels.has(jobOf(row)!.prediction!) }" :title="`最高候选 ${jobOf(row)!.prediction} · ${jobOf(row)!.probability == null ? '仅排名' : percent(jobOf(row)!.probability)}`"><span class="mono">{{ jobOf(row)!.prediction }}</span><b class="tabular">{{ jobOf(row)!.probability == null ? '仅排名' : percent(jobOf(row)!.probability) }}</b></span>
               </div>
               <span v-if="detailText(jobOf(row)!)" class="cell-sub live-progress" :class="detailClass(jobOf(row)!)" role="status" :title="detailText(jobOf(row)!)">{{ detailText(jobOf(row)!) }}</span>
             </div>
@@ -401,7 +408,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
           <template #model="{row}">
             <div v-if="row.prediction" class="cand" :class="{ 'is-degraded': degradedModels.has(row.prediction) }">
               <span class="cand-name mono" :title="row.prediction">{{ row.prediction }}</span>
-              <span class="cand-meter"><span class="meter" aria-hidden="true"><i :style="{ width: `${(row.probability ?? 0) * 100}%` }" /></span><b class="tabular">{{ percent(row.probability) }}</b></span>
+              <span class="cand-meter"><span class="meter" aria-hidden="true"><i :style="{ width: `${(row.probability ?? 0) * 100}%` }" /></span><b class="tabular">{{ row.probability == null ? '仅排名' : percent(row.probability) }}</b></span>
             </div>
             <span v-else class="cell-empty">—</span>
           </template>
@@ -464,8 +471,8 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
               <strong class="mono" :class="{ 'text-danger': reportDegraded.has(report.rounds.at(-1)!.score.prediction) }">{{ reportTop.label }}</strong>
             </div>
             <div v-if="reportTop" class="rpt-metric">
-              <span class="rpt-caption">概率</span>
-              <strong class="tabular">{{ percent(reportTop.probability) }}</strong>
+              <span class="rpt-caption">置信度</span>
+              <strong class="tabular" :title="reportTop.probability == null ? '每轮少于 3 个有效回答，lm-detector 只给排名' : '参考库内封闭集合校准概率'">{{ reportTop.probability == null ? '仅排名' : percent(reportTop.probability) }}</strong>
             </div>
             <div v-if="detailText(report)" class="rpt-status" :class="detailClass(report)" role="status" aria-live="polite">{{ detailText(report) }}</div>
           </div>
@@ -491,7 +498,7 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
 
         <section class="rpt-section">
           <div class="rpt-section-head">
-            <h3>模型概率</h3>
+            <h3>{{ rankingOnly ? '模型排名' : '模型概率' }}</h3>
             <span v-if="currentRound" class="rpt-families"><span v-for="f in currentRound.score.families" :key="f.family" class="pill tone-neutral">{{ f.display_name }} <b class="tabular">{{ percent(f.probability) }}</b></span></span>
             <ZSelect v-if="report.rounds.length" v-model="roundIndex" class="rpt-round" :options="report.rounds.map((r,i)=>({value:i,label:`第${r.number}轮 · ${verdict(r.verdict)} · ${date(r.finishedAt)}`}))" aria-label="报告轮次" />
           </div>
@@ -499,12 +506,12 @@ onUnmounted(() => { disposed=true; if(timer) clearTimeout(timer); if(clockTimer)
             <div class="prob-list">
               <div v-for="(r,i) in shownResults" :key="r.model" class="prob-row" :class="{ top: i===0, degraded: reportDegraded.has(r.model) }">
                 <span class="prob-name"><span class="mono" :title="r.model">{{ r.label }}</span><span v-if="reportDegraded.has(r.model)" class="pill sm tone-danger">降智模型</span></span>
-                <span class="prob-bar" aria-hidden="true"><i :style="{ width: `${r.probability*100}%` }" /><s v-if="reportDegraded.has(r.model) && thresholdShown" :style="{ left: `${report.config.degradedPercent}%` }" /></span>
-                <b class="prob-value tabular">{{ percent(r.probability) }}</b>
+                <span class="prob-bar" aria-hidden="true"><i :style="{ width: `${barWidth(r)}%` }" /><s v-if="reportDegraded.has(r.model) && thresholdShown && !rankingOnly" :style="{ left: `${report.config.degradedPercent}%` }" /></span>
+                <b class="prob-value tabular">{{ r.probability != null ? percent(r.probability) : (r.score ?? 0).toFixed(2) }}</b>
               </div>
             </div>
             <div class="prob-foot">
-              <span class="help">标红为配置的降智模型<template v-if="thresholdShown">，竖线为降智判定阈值 {{ report.config.degradedPercent }}%</template>。</span>
+              <span class="help">标红为配置的降智模型<template v-if="rankingOnly">；本轮少于 3 个有效回答，显示 lm-detector 排名分（{{ currentRound!.score.reason || '无校准置信度' }}）</template><template v-else-if="thresholdShown">，竖线为降智判定阈值 {{ report.config.degradedPercent }}%</template>。</span>
               <button v-if="hiddenModels > 0" type="button" class="link-button" :aria-expanded="showAllModels" @click="showAllModels=!showAllModels">{{ showAllModels ? '收起' : `显示全部 ${sortedResults.length} 个模型` }}</button>
             </div>
           </template>

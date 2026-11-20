@@ -17,8 +17,7 @@ from urllib.parse import parse_qsl, urlencode
 
 ROOT=Path(__file__).resolve().parents[1]
 BINARY=ROOT/"backend/target/debug/modeltrace-health"
-DENY_TIMESTAMPS=False
-RUNTIME_TMPDIR=None
+LMFPD=ROOT/"vendor/lmfpd/data"
 def raw(v): return json.dumps(v,ensure_ascii=False,separators=(",",":"),allow_nan=False).encode()
 
 def model_events(*values, end=False, wire_kind='json', parsed=True):
@@ -31,6 +30,31 @@ def model_events(*values, end=False, wire_kind='json', parsed=True):
         events.append(b'GPE2'+struct.pack('>III',len(event),len(message),0)+event+message)
     return {'events':len(events),'end':end},b'HME1'+struct.pack('>I',len(events))+b''.join(struct.pack('>I',len(e)) for e in events)+b''.join(events)
 
+def split_detector(data):
+    n=struct.unpack('<I',data[:4])[0];start=(4+n+3)//4*4
+    return json.loads(data[4:4+n]),data[start:]
+def join_detector(header,planes):
+    h=raw(header);out=struct.pack('<I',len(h))+h
+    return out+b' '*((-len(out))%4)+planes
+_ZSTD={}
+def zstd(data):
+    key=hashlib.sha256(data).hexdigest()
+    if key not in _ZSTD:_ZSTD[key]=subprocess.run(['zstd','-1','-q','-c'],input=data,capture_output=True,check=True).stdout
+    return _ZSTD[key]
+def mutate_bank(host,built_at=None,rename=None):
+    """Make a consistent new data version: bundle.json and the detector header must agree."""
+    bundle=json.loads(host.bank);header,planes=split_detector(host.detector)
+    if built_at:bundle['built_at']=built_at;header['bank_built_at']=built_at
+    if rename:
+        old,new=rename
+        for m in bundle['models']:
+            if m['id']==old:m['id']=new;m['display_name']=new
+        header['model_ids']=[new if i==old else i for i in header['model_ids']]
+    host.bank=raw(bundle);host.detector=join_detector(header,planes)
+def model_reply(count=330):
+    # Alternating low/high values: passes lm-detector's language-model sequence check.
+    return ','.join(str((i*137)%177+1 if i%2==0 else 178+(i*89)%178) for i in range(count))
+
 class Host:
     def __init__(self, binary=BINARY, state=None, protocol_version=7):
         self.protocol_version=protocol_version
@@ -38,17 +62,14 @@ class Host:
         self.scheduling=[];self.pending_callbacks={};self.schedule_epochs={};self.suspended=set()
         self.state={} if state is None else state
         self.enabled=True;self.streams={};self.executions=[];self.closes=0;self.fail_model=False;self.fail_download=False
-        self.identity="original";self.bank=(ROOT/"vendor/modeltrace/data/unified_bank.json").read_bytes();self.sha="b"*40
+        self.identity="original";self.model_like=True;self.bank=(LMFPD/"bundle.json").read_bytes();self.detector=(LMFPD/"shared_detector.bin").read_bytes()
         self.disable_calls=0;self.fail_disable=False;self.sequence=1
         self.fail_put=None;self.model_read_delay=0;self.model_response_delay=0;self.callback_response_delay=0
         self.additional_accounts=[];self.error_logs=[];self.error_log_queries=[];self.fail_error_log=False
         self.groups=[{'id':'group-test','name':'测试组'},{'id':'group-degraded','name':'降智隔离组'}]
         self.memberships=['group-test'];self.move_calls=0;self.fail_move=False;self.ignore_move=False;self.updates=[]
-        env=os.environ.copy();env['MODELTRACE_DEV_PYTHON']=str(ROOT/'.venv/bin/python')
-        if RUNTIME_TMPDIR is not None:env['TMPDIR']=str(RUNTIME_TMPDIR)
+        env=os.environ.copy()
         command=[str(binary)]
-        if DENY_TIMESTAMPS:
-            command=['strace','-f','-o',os.devnull,'-e','trace=utimensat','-e','inject=utimensat:error=EPERM',*command]
         self.process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
         contributes={name:{'id':'personal.modeltrace-health.'+name,'version':version,'stages':[name]} for name,version in [('management',2),('maintenance',1)]}
         self.send({'type':'hello','handshake':{'protocol_version':protocol_version,'artifact_sha256':'a'*64,'plugin_id':'personal.modeltrace-health','instance_id':'test','generation':1,'incarnation':'test-run','contributes':contributes}}, {})
@@ -221,7 +242,7 @@ class Host:
             return {'request_id':f'request-{len(self.executions)}','stream':'model-stream'},b''
         if method=='host.model.stream_read':
             if self.model_read_delay:time.sleep(self.model_read_delay)
-            numbers=','.join(str((i*i+i*97)%355+1) for i in range(330))
+            numbers=model_reply() if self.model_like else ','.join(str(i%355+1) for i in range(330))
             value={'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':numbers}]}]}}
             event=raw({'wire':{'protocol':'openai','payload':{'kind':'json','event':None,'data':value}}})
             event=b'GPE2'+struct.pack('>III',len(event),0,0)+event
@@ -232,9 +253,12 @@ class Host:
             if self.protocol_version >= 5:
                 assert all(isinstance(v,list) and all(isinstance(b,int) and 0<=b<=255 for b in v) for _,v in p['headers'])
             if self.fail_download:raise SimulatedFault('network unavailable')
-            if url.endswith('/xqy2006/ModelTrace'):data=raw({'default_branch':'main'})
-            elif '/commits/' in url:data=raw({'sha':self.sha})
-            elif '/'+self.sha+'/data/unified_bank.json' in url:data=self.bank
+            assert url.startswith(('https://lm.ikale.io/data/','https://cdn.jsdmirror.com/npm/lmfpd-data@latest/')),url
+            version=hashlib.sha256(self.detector).hexdigest()
+            if url.endswith('/bundle.json'):
+                bundle=json.loads(self.bank);bundle['files']={'shared_detector.bin':{'parts':[f'shared_detector.bin.{version[:16]}.0.zst'],'bytes':len(self.detector),'sha256':version}}
+                data=raw(bundle)
+            elif url.endswith(f'/chunks/shared_detector.bin.{version[:16]}.0.zst'):data=zstd(self.detector)
             else:raise AssertionError(url)
             response={'status':200,'headers':[],'stream':self.stream(data)}
             if self.protocol_version >= 5:response.update(http_version='HTTP/1.1',trailers=[])
@@ -264,6 +288,10 @@ class Integration(unittest.TestCase):
         self.host=Host();self.addCleanup(self.host.close)
         self.host.request('api/banks/builtin',{}) # Most cases isolate probing from cold startup; tested separately below.
     def config(self,**overrides):
+        # With one challenge per round lm-detector gives no confidence, so a 100% low-confidence threshold no
+        # longer forces retests. Those cases now send a reply that fails the language-model sequence check,
+        # which yields no ranking and the same low-confidence retest path.
+        if 'lowConfidencePercent' in overrides:self.host.model_like=overrides['lowConfidencePercent']<100
         b=self.host.request('api/bootstrap');c=b['config'];c.update({'keyId':'key-test','retryDelaySeconds':0});c.update(overrides)
         self.host.request('api/config',{'config':c,'revision':b['configRevision']});return c
     def submit(self):return self.host.request('api/submit',{'accountIds':['acct-test'],'requestId':'submit-one'})['submitted'][0]
@@ -427,7 +455,7 @@ class Integration(unittest.TestCase):
     def test_timeout_accepts_valid_partial_output_and_separates_reasoning(self):
         self.config(timeoutSeconds=1,lowConfidencePercent=0,degradedPercent=100)
         identity=self.submit();original=self.host.callback;sent=[]
-        text=','.join(str((i*i+i*97)%355+1) for i in range(240))+',35'
+        text=model_reply(240)+',35'
         def callback(method,p,body):
             if method=='host.model.stream_read' and not sent:
                 sent.append(True);self.host.model_read_delay=2
@@ -736,7 +764,8 @@ class Integration(unittest.TestCase):
         identity=self.submit();self.assertEqual(identity,self.submit());self.host.tick()
         report=self.host.request('api/report?id='+identity)
         self.assertEqual(len(report['rounds']),1);self.assertEqual(len(self.host.executions),1);self.assertFalse(report['config']['autoDisable']);self.assertEqual(self.host.disable_calls,0)
-        self.assertEqual(report['bankHash'],hashlib.sha256((ROOT/'vendor/modeltrace/data/unified_bank.json').read_bytes()).hexdigest())
+        packed=self.host.bank;packed=struct.pack('<I',len(packed))+packed+self.host.detector
+        self.assertEqual(report['bankHash'],hashlib.sha256(packed).hexdigest())
     def test_batch_retests_keep_each_account_route(self):
         self.host.additional_accounts=[{'id':'acct-proxy-two','name':'second-account','provider':'openai','enabled':True,'status':'normal','planType':'plus','groups':[],'outboundProxyId':'proxy-two'}]
         self.config(lowConfidencePercent=100,degradedPercent=100,lowConfidenceRetries=1)
@@ -904,7 +933,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(len(self.host.executions),1)
     def test_update_atomicity_rollback_and_running_snapshot(self):
         self.config();identity=self.submit();self.host.tick()
-        old=self.host.request('api/bootstrap')['banks']['active'];new=json.loads(self.host.bank);new['built_at']='2026-10-18T00:00:00Z';self.host.bank=raw(new)
+        old=self.host.request('api/bootstrap')['banks']['active'];mutate_bank(self.host,built_at='2026-12-18T00:00:00Z')
         checked=self.host.request('api/banks/check',{});self.assertIsNotNone(checked['update']['available'])
         applied=self.host.request('api/banks/apply',{});self.assertNotEqual(old['hash'],applied['active']['hash'])
         self.assertEqual(self.host.request('api/report?id='+identity)['bankHash'],old['hash'])
@@ -913,11 +942,7 @@ class Integration(unittest.TestCase):
     def test_rejects_incompatible_bank_and_rule_conflict(self):
         self.config();old=self.host.request('api/bootstrap')['banks']['active']['hash'];b=json.loads(self.host.bank);b['schema']='unknown';self.host.bank=raw(b)
         failed=self.host.request('api/banks/check',{});self.assertIsNotNone(failed['update']['error']);self.assertEqual(failed['active']['hash'],old)
-        b=json.loads((ROOT/'vendor/modeltrace/data/unified_bank.json').read_bytes());i=next(i for i,m in enumerate(b['models']) if m['id']=='gpt-5.6-luna')
-        b['models'].pop(i);b['robust']['model_order'].pop(i)
-        for kind in ['hellinger','ordered_blocks']:b['robust'][kind]['centroids'].pop(i)
-        for environment in b['robust']['ordered_blocks']['environment_centroids']:environment.pop(i)
-        self.host.bank=raw(b);self.host.request('api/banks/check',{})
+        self.host.bank=(LMFPD/"bundle.json").read_bytes();mutate_bank(self.host,rename=('gpt-5.6-luna','gpt-5.6-luna-renamed'));self.host.request('api/banks/check',{})
         conflict=self.host.request('api/banks/apply',{},ok=False);self.assertIn('gpt-5.6-luna',conflict['error']['message']);self.assertEqual(self.host.request('api/bootstrap')['banks']['active']['hash'],old)
     def test_identity_change_stops_samples(self):
         self.config(autoDisable=True,lowConfidencePercent=100,degradedPercent=100);identity=self.submit();self.host.tick();self.host.identity='changed';self.host.tick()
@@ -1009,9 +1034,9 @@ class Integration(unittest.TestCase):
         cfg['schedule'].update(enabled=True,scope='ids',accountIds=['acct-test'])
         b=self.host.request('api/bootstrap')
         self.host.request('api/config',{'config':cfg,'revision':b['configRevision']})
-        self.host.close();state=self.host.state
+        self.host.close();state=self.host.state;model_like=self.host.model_like
         state[('control','main')]['value']['nextDue']=1
-        self.host=Host(state=state);self.addCleanup(self.host.close)
+        self.host=Host(state=state);self.host.model_like=model_like;self.addCleanup(self.host.close)
         self.host.request('api/banks/builtin',{})
 
     def test_manual_does_not_skip_schedule_or_change_next_due(self):
@@ -1081,11 +1106,11 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.host.request('api/report?id='+scheduled)['status'],'completed')
 
     def test_partial_update_keeps_active_and_cleans_on_restart(self):
-        self.config();old=self.host.request('api/bootstrap')['banks']['active']['hash'];b=json.loads(self.host.bank);b['built_at']='new-build';self.host.bank=raw(b)
+        self.config();old=self.host.request('api/bootstrap')['banks']['active']['hash'];mutate_bank(self.host,built_at='new-build')
         self.host.request('api/banks/check',{});self.host.fail_put=lambda key,value:key[0]=='banks'
         self.host.request('api/banks/apply',{},ok=False);self.assertEqual(self.host.request('api/bootstrap')['banks']['active']['hash'],old)
     def test_update_survives_restart_and_is_used_by_new_tasks(self):
-        self.config();b=json.loads(self.host.bank);b['built_at']='new-build';self.host.bank=raw(b);self.host.request('api/banks/check',{})
+        self.config();mutate_bank(self.host,built_at='new-build');self.host.request('api/banks/check',{})
         updated=self.host.request('api/banks/apply',{})['active']['hash'];state=self.host.state;self.host.close()
         self.host=Host(state=state);self.addCleanup(self.host.close);self.assertEqual(self.host.request('api/bootstrap')['banks']['active']['hash'],updated)
         identity=self.submit();self.host.tick();self.assertEqual(self.host.request('api/report?id='+identity)['bankHash'],updated)
@@ -1225,7 +1250,7 @@ class Integration(unittest.TestCase):
             return original(method,p,body)
         self.host.callback=callback;self.host.tick(3)
         report=self.host.request('api/report?id='+identity)
-        self.assertEqual(len(report['attempts']),3);self.assertEqual(len(workers),1)
+        self.assertEqual(len(report['attempts']),3);self.assertEqual(len(workers),0)  # scoring runs in-process
         self.assertTrue(all('有效数字' in a['error'] for a in report['attempts']))
 
     def test_restart_replays_receipt_and_saved_sample_without_model_request(self):
@@ -1338,7 +1363,7 @@ class Integration(unittest.TestCase):
             if method=='host.model.stream_read':
                 reads.append(True)
                 if len(reads)==1:
-                    text=','.join(str(i%355+1) for i in range(330))
+                    text=model_reply()
                     return model_events({'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':text}]}]}},end=False)
                 return model_events(end=True)
             return original(method,p,body)
@@ -1464,7 +1489,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.host.disable_calls,0);self.assertEqual(len(self.host.executions),1)
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,default=BINARY);parser.add_argument('--deny-timestamps',action='store_true',help='Use strace to deny utimensat and exercise restricted runtime extraction');parser.add_argument('--runtime-tmpdir',type=Path,help='Set TMPDIR for the plugin process to exercise runtime directory fallback');args,remaining=parser.parse_known_args();BINARY=args.binary;DENY_TIMESTAMPS=args.deny_timestamps;RUNTIME_TMPDIR=args.runtime_tmpdir
+    parser=argparse.ArgumentParser();parser.add_argument('--binary',type=Path,default=BINARY);args,remaining=parser.parse_known_args();BINARY=args.binary
     # Host defaults are evaluated at definition time.
     Host.__init__.__defaults__=(BINARY,None,7)
     unittest.main(argv=[sys.argv[0],*remaining])

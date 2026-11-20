@@ -1,2 +1,1 @@
-numpy==2.4.3
-pyelftools==0.33
+# 构建与验证脚本只使用 Python 标准库；lm-detector 评分已改为 Rust 原生实现，不再需要 NumPy。

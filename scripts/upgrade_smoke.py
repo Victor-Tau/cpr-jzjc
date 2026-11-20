@@ -69,14 +69,25 @@ def main():
             restored = current.request("api/report?id=" + identity)
             replay = current.request("api/submit", {"accountIds": ["acct-test"], "requestId": "actual-upgrade"})
             assert replay["submitted"] == [identity], "upgrade must retain submission idempotency"
+            # 2.0.0 replaces ModelTrace banks (no "format") with the built-in lm-detector bank: the revision is
+            # bumped and degraded models / aliases missing from the new bank are dropped.
+            cross_engine = "format" not in before["banks"]["active"]
+            new_models = {m["id"] for m in after["banks"]["active"]["models"]}
             for key, value in before["config"].items():
-                if key == "retentionDays":
+                if cross_engine and key == "degradedModels":
+                    assert after["config"][key] == [m for m in value if m in new_models] or (not any(m in new_models for m in value)), (value, after["config"][key])
+                elif cross_engine and key == "aliases":
+                    assert after["config"][key] == {k: v for k, v in value.items() if v in new_models}
+                elif key == "retentionDays":
                     # 1.7.1 fixes history retention to the most recent three days.
                     assert value in (3,47) and after["config"][key] == 3, (value, after["config"][key])
                 else:
                     equivalent(value, after["config"][key])
-            for key in ["configRevision", "nextDue"]:
-                assert after[key] == before[key], key
+            assert after["nextDue"] == before["nextDue"], "nextDue"
+            if cross_engine:
+                assert after["configRevision"] == before["configRevision"] + 1
+            else:
+                assert after["configRevision"] == before["configRevision"], "configRevision"
             assert after["config"]["failureRetries"] == 4
             assert after["config"]["requestRejectedAction"] == "continue"
             assert not after["config"]["autoMoveGroup"]
@@ -93,9 +104,15 @@ def main():
                         if attempt['diagnostics'] is not None:
                             attempt['diagnostics'].setdefault('partial', False)
                 equivalent(previous, restored[key])
-            assert after["banks"]["active"]["hash"] == before["banks"]["active"]["hash"]
+            if cross_engine:
+                assert after["banks"]["active"]["hash"] == after["banks"]["builtin"]["hash"]
+                assert after["banks"]["active"]["format"] == "lmfpd-v1" and after["banks"]["previous"] is None
+                assert not any(k[0] == "banks" for k in current.state), "ModelTrace bank chunks must be removed"
+            else:
+                assert after["banks"]["active"]["hash"] == before["banks"]["active"]["hash"]
             assert len(current.executions) == 0
-            print(f"Upgrade {manifests[0]['version']} -> {manifests[1]['version']}: settings, schedule, history and bank retained; no probe replay.")
+            kept = "lm-detector bank installed" if cross_engine else "bank retained"
+            print(f"Upgrade {manifests[0]['version']} -> {manifests[1]['version']}: settings, schedule and history retained; {kept}; no probe replay.")
         finally:
             current.close()
 

@@ -76,10 +76,12 @@ const dirty = computed(() => {
   return !mapping || snapshot(cfg.value, mapping) !== savedSnapshot.value
 })
 
-type NumberKey = 'maxOutputTokens' | 'timeoutSeconds' | 'maxConcurrency' | 'lowConfidencePercent' | 'degradedPercent' | 'confirmationRounds' | 'lowConfidenceRetries' | 'failureRetries' | 'retryDelaySeconds' | 'retentionPerAccount' | 'triggerCooldownMinutes' | 'updateIntervalHours'
+type NumberKey = 'challengesPerRound' | 'maxOutputTokens' | 'timeoutSeconds' | 'maxConcurrency' | 'lowConfidencePercent' | 'degradedPercent' | 'confirmationRounds' | 'lowConfidenceRetries' | 'failureRetries' | 'retryDelaySeconds' | 'retentionPerAccount' | 'triggerCooldownMinutes' | 'updateIntervalHours'
 interface NumberField { key: NumberKey; label: string; min: number; max?: number; step?: number; help: string; detail?: string }
 const number = (event: Event, key: NumberKey) => { cfg.value[key] = Number((event.target as HTMLInputElement).value) }
 const requestNumbers: NumberField[] = [
+  { key: 'challengesPerRound', label: '每轮挑战数', min: 1, max: 3, step: 1, help: '默认 1。设为 3 时每轮 3 个回答，才有 lm-detector 校准置信度；1–2 只给排名。',
+    detail: 'lm-detector 只为每轮 3 个有效回答校准置信度。挑战数小于 3 时，只按最高候选是否在降级名单内并连续确认轮数判定，概率阈值与低置信度复测不生效。挑战数为 3 时每轮请求量与 Key 用量约为 3 倍；失败重试按单个挑战计。' },
   { key: 'maxOutputTokens', label: '输出 token 上限', min: 512, max: 16384, help: '范围 512–16384。' },
   { key: 'timeoutSeconds', label: '单次请求超时（秒）', min: 0, step: 1, help: '默认 120 秒，0 表示不设超时；后台总预算 180 秒。',
     detail: '执行时会提前预留校验和保存时间；插件后台总预算为 180 秒，默认 120 秒请求可完整等待，更长请求仍受本次剩余预算约束。预算内收到的部分正文通过样本校验后可接纳；仅推理内容不能作为样本。' },
@@ -136,12 +138,12 @@ const triggerState = computed(() => {
 })
 
 const bankMeta = computed(() => [
-  { label: '当前提交', value: props.banks.active.commit, mono: true },
+  { label: '检测器 SHA-256', value: props.banks.active.commit, mono: true },
   { label: 'SHA-256', value: props.banks.active.hash, mono: true },
   { label: '建库时间', value: date(props.banks.active.builtAt), mono: false },
   { label: '候选模型', value: `${props.banks.active.models.length} 个`, mono: false },
   { label: '最近检查', value: date(props.banks.update.checkedAt), mono: false },
-  { label: '评分算法提交', value: props.banks.engineCommit, mono: true },
+  { label: 'lm-detector 提交', value: props.banks.engineCommit, mono: true },
 ])
 
 function useDefaults() {
@@ -380,7 +382,7 @@ function save() {
     <!-- 6. Fingerprint bank -->
     <section class="panel" :aria-labelledby="id('bank')">
       <div class="panel-head">
-        <div class="panel-title"><span class="panel-icon"><Fingerprint :size="17" /></span><div><h3 :id="id('bank')">ModelTrace 指纹库</h3><p>来源 <span class="mono source">https://github.com/xqy2006/ModelTrace</span>；下载经兼容性与离线评分校验后应用，进行中的检测继续使用原版本。</p></div></div>
+        <div class="panel-title"><span class="panel-icon"><Fingerprint :size="17" /></span><div><h3 :id="id('bank')">lm-detector 指纹库</h3><p>来源 <span class="mono source">https://lm.ikale.io/data/</span>（lm-detector 参考库与检测器）；下载经兼容性与离线评分校验后应用，进行中的检测继续使用原版本。</p></div></div>
         <div class="panel-actions"><ZButton :loading="busy" @click="emit('bank', 'check')"><template #icon><RefreshCw :size="14" /></template>检查更新</ZButton></div>
       </div>
       <dl class="meta-grid">
@@ -413,7 +415,7 @@ function save() {
         <div class="field">
           <span class="field-label">HTTPS 镜像前缀（可选）</span>
           <ZInput v-model="cfg.mirrorPrefix" placeholder="https://your-mirror.example" aria-label="GitHub镜像前缀" :aria-describedby="id('mirror-help')" />
-          <span :id="id('mirror-help')" class="help">实际地址为 镜像前缀/完整 GitHub 地址，保存后生效。</span>
+          <span :id="id('mirror-help')" class="help">留空时依次使用 lm.ikale.io 与 jsdmirror 镜像；填写后实际地址为 镜像前缀/https://lm.ikale.io/data/…，保存后生效。</span>
         </div>
       </div>
     </section>

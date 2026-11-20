@@ -31,8 +31,6 @@ jobs:
       CPR_TARGET: ${{ matrix.target }}
       CPR_NATIVE_BUILD: '1'
       CARGO_BUILD_JOBS: '2'
-      OPENBLAS_NUM_THREADS: '1'
-      OMP_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,21 +39,14 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: stable
-          cache: false
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          key: build-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'backend/Cargo.lock', 'frontend/pnpm-lock.yaml', 'requirements-dev.txt', 'scripts/runtime_target.py', 'scripts/numpy-wheel*.sha256') }}
+          key: build-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'backend/Cargo.lock', 'frontend/pnpm-lock.yaml', 'requirements-dev.txt') }}
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/go/pkg/mod
-            ~/.cache/go-build
             backend/target
             .cache/pnpm
-            .cache/runtime/${{ matrix.target }}
       - name: Install toolchains
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
@@ -64,8 +55,6 @@ jobs:
           npm install --global pnpm@9.12.2
           pnpm config set store-dir .cache/pnpm
           python3 -m pip install -r requirements-dev.txt
-          go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
-          go env GOPATH | sed 's|$|/bin|' >> "$GITHUB_PATH"
       - name: Check release version
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}

@@ -8,9 +8,10 @@
 | --- | --- |
 | `backend/` | Rust 插件进程、宿主交互、检测调度与状态管理 |
 | `frontend/` | Vue / TypeScript 插件管理页面 |
-| `engine/` | Python / NumPy 校验与评分 worker |
-| `vendor/modeltrace/` | 固定版本的 ModelTrace 源码、候选库与原始许可 |
-| `scripts/` | 运行时构建、打包、许可证收集及回归验证 |
+| `backend/src/lmfpd/` | lm-detector Rust SDK 评分代码（上游文件，仅调整模块路径） |
+| `backend/src/engine.rs` | 进程内评分：挑战生成、样本校验、评分结果转换 |
+| `vendor/lmfpd/` | 内置 lm-detector 参考库（`bundle.json`）、检测器（`shared_detector.bin`）、来源与原始许可 |
+| `scripts/` | 打包、许可证收集及回归验证 |
 | `plugin.json` | 插件身份、宿主兼容范围、资源及私有状态声明 |
 | `docs/releases/` | 各发行版本的详细说明 |
 
@@ -22,9 +23,9 @@
 | --- | --- |
 | Rust | `rust-toolchain.toml` 固定为 1.99.1，含 rustfmt 和 Clippy |
 | Node.js / pnpm | Node.js >=24、pnpm 9.12.2，使用前端锁文件安装依赖 |
-| Python | >=3.11.4，支持安全解压验证；CI 使用 3.11.17，开发依赖见 `requirements-dev.txt` |
+| Python | >=3.11.4，仅用于验证脚本（标准库）；CI 使用 3.11.17 |
 | Zig / cargo-zigbuild | 构建 glibc 2.36 目标的发布二进制；也可在匹配架构、glibc <=2.36 的 Linux 环境启用原生构建 |
-| crane | 拉取构建脚本固定的 Python 运行时基础镜像；已有基础归档时可复用 |
+| zstd | RPC 回归模拟 lm-detector 数据源时压缩检测器分片 |
 | cpr-plugin | `scripts/install_packager.py` 自动使用 `backend/Cargo.toml` 中 SDK 的固定提交安装 |
 
 ```bash
@@ -36,7 +37,7 @@ python -m pip install -r requirements-dev.txt
 pnpm --dir frontend install --frozen-lockfile
 ```
 
-Rust 与前端依赖分别由 `backend/Cargo.lock` 和 `frontend/pnpm-lock.yaml` 固定。SDK 的确切提交见 `backend/Cargo.toml`，ModelTrace 来源见 `vendor/modeltrace/SOURCE.json`。包使用 `trustedProcess`，管理页面应从 CPR 中打开，以获得宿主提供的桥接接口。
+Rust 与前端依赖分别由 `backend/Cargo.lock` 和 `frontend/pnpm-lock.yaml` 固定。SDK 的确切提交见 `backend/Cargo.toml`，lm-detector 来源与内置数据摘要见 `vendor/lmfpd/SOURCE.json`。包使用 `trustedProcess`，管理页面应从 CPR 中打开，以获得宿主提供的桥接接口。
 
 ## 自动构建与发布
 
@@ -44,25 +45,23 @@ Rust 与前端依赖分别由 `backend/Cargo.lock` 和 `frontend/pnpm-lock.yaml`
 
 双架构实现的本地构建、架构防错与发布流程验证见 [ARM64 验证记录](verification-arm64.md)。
 
-每个任务调用同一个 `scripts/package.sh`，检查 Rust、前端、评分及构建脚本，验证最终包的所有 ELF 架构、资源摘要、私有 Python/NumPy 和冷启动评分，再执行最终包二进制的完整 RPC 回归。缓存键包含目标架构和依赖输入，两个任务使用各自工作区，不共享运行时和许可证输出。
+每个任务调用同一个 `scripts/package.sh`，检查 Rust、前端、评分及构建脚本，验证最终包的 ELF 架构、资源摘要和进程内启动评分，再执行最终包二进制的完整 RPC 回归。缓存键包含目标架构和依赖输入，两个任务使用各自工作区，不共享运行时和许可证输出。
 
 日常功能修改无需增加 ARM64 专用操作。维护者一次性在仓库规则中将 `Build x86_64-unknown-linux-gnu` 和 `Build aarch64-unknown-linux-gnu` 设为必需检查。
 
 发布时同步 `plugin.json`、`backend/Cargo.toml` 和 `frontend/package.json` 中的同一个版本，推送 `v<版本>` 标签。工作流检查版本一致性，等待两个构建任务通过，核对两份安装包及摘要后上传 GitHub Release。安装包名称和 manifest 的 `package.target` 区分架构，插件版本不加架构后缀。
 
-升级 CPR SDK 时，打包工具自动跟随 SDK 提交；验证脚本从源码 manifest 读取预期兼容范围。升级 Python/NumPy 或系统兼容基线时，需更新 `scripts/runtime_target.py` 中两种目标的固定输入及对应 wheel 摘要，CI 会验证各自的产物。
+升级 CPR SDK 时，打包工具自动跟随 SDK 提交；验证脚本从源码 manifest 读取预期兼容范围。升级 lm-detector 时，用上游 `sdk/rust/src` 中的 `analysis`、`challenge`、`codec`、`error`、`features`、`ranker` 覆盖 `backend/src/lmfpd/`（把 `crate::` 改为 `super::`），同步 `data.rs` 的解码部分，并用 `https://lm.ikale.io/data/` 的 `bundle.json` 与解压后的 `shared_detector.bin` 替换 `vendor/lmfpd/data/`，更新 `SOURCE.json`。
 
 ## 检查与测试
 
-在仓库根目录及已激活的 Python 虚拟环境中执行：
+在仓库根目录执行：
 
 ```bash
 cargo fmt --manifest-path backend/Cargo.toml --check
 cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings
 cargo test --manifest-path backend/Cargo.toml --locked
 pnpm --dir frontend build
-python -m unittest discover -s engine/tests -v
-python -m unittest discover -s scripts/tests -v
 node scripts/api_smoke.mjs
 cargo build --manifest-path backend/Cargo.toml --locked
 python scripts/protocol_smoke.py -v
@@ -105,14 +104,13 @@ CPR_TARGET=aarch64-unknown-linux-gnu CPR_NATIVE_BUILD=1 \
 
 `CPR_NATIVE_BUILD=1` 要求宿主 Rust 目标与发布目标一致，且系统使用 glibc <=2.36。其他构建环境请安装 Zig / cargo-zigbuild，并在对应 Linux 架构运行最终包验证。
 
-该脚本安装前端依赖、构建页面、检查 Rust、运行单元测试、构建私有运行时、收集许可、生成发布二进制，并通过官方 CLI 打包、验证安装包。最终产物在 `dist/`，包括 `.tar.gz` 与对应 `.sha256`。完整 RPC 回归由 CI 对最终安装包执行；本地也可通过 `protocol_smoke.py --binary ...` 运行。浏览器及跨版本升级验证需另外运行。
+该脚本安装前端依赖、构建页面、检查 Rust、运行单元测试、收集许可、生成发布二进制，并通过官方 CLI 打包、验证安装包。最终产物在 `dist/`，包括 `.tar.gz` 与对应 `.sha256`。完整 RPC 回归由 CI 对最终安装包执行；本地也可通过 `protocol_smoke.py --binary ...` 运行。浏览器及跨版本升级验证需另外运行。
 
 需要分别执行步骤时：
 
 ```bash
 taskset -c "$task_cpu" pnpm --dir frontend build
 task_target="${CPR_TARGET:-x86_64-unknown-linux-gnu}"
-python scripts/build_runtime.py --target "$task_target"
 python scripts/collect_licenses.py
 taskset -c "$task_cpu" cargo zigbuild --manifest-path backend/Cargo.toml \
   --locked --release --target "${task_target}.2.36"
@@ -124,24 +122,13 @@ python scripts/verify_artifact.py \
   "dist/personal.modeltrace-health-${task_version}-${task_target}.tar.gz" "$task_target"
 ```
 
-运行时脚本验证固定基础镜像配置、镜像层、NumPy wheel 摘要及 ELF 架构，不依赖 Docker 守护进程。缓存位于 `.cache/runtime/<目标>/`。已有由 crane 拉取的基础归档时，可传入 `--base-tar /path/to/python-base.tar`。
-
-未修改 Python/NumPy 依赖时，可复用同一架构、已验证发布包中的运行时，并刷新评分与上游源码：
-
-```bash
-python scripts/refresh_runtime.py /path/to/previous-release.tar.gz \
-  --target aarch64-unknown-linux-gnu
-```
-
-目标也可由 `CPR_TARGET` 指定，默认 x86_64。必须同时提供原包的 `.sha256`；脚本校验包及全部资源，并在写入前检查 manifest 与运行时 ELF 架构。选错目标或校验失败时保留现有运行时。依赖变更时使用完整运行时构建。刷新后重新收集许可证，再编译、打包并运行最终包验证。
-
-`verify_artifact.py` 验证包和资源摘要、静态页面引用、私有 Python/NumPy 离线评分，并运行实际插件进程验证 Rust 解包和完整检测流程。跨版本保留验证使用：
+`verify_artifact.py` 验证包和资源摘要、静态页面引用、包内不再含 Python 运行时，并运行实际插件进程验证进程内评分和完整检测流程。跨版本保留验证使用：
 
 ```bash
 python scripts/upgrade_smoke.py /path/to/previous-release.tar.gz /path/to/current-release.tar.gz
 ```
 
-## 浏览器与受限运行时验证
+## 浏览器验证
 
 浏览器测试使用实际插件生成的模拟数据和生产前端，覆盖筛选、批量提交、配置、报告、指纹库、实时进度、取消、深色主题及移动布局：
 
@@ -161,21 +148,6 @@ PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin node scripts/ui_smoke.mjs
 PLAYWRIGHT_BROWSERS_PATH=.cache/browser-bin UI_DIST=/path/to/dist UI_SHOTS=/path/to/shots \
   node scripts/ui_smoke.mjs
 ```
-
-安装 strace 后，可验证禁止恢复时间戳的环境：
-
-```bash
-python scripts/protocol_smoke.py --binary /path/to/package/bin/modeltrace-health \
-  --deny-timestamps Integration.test_binding_idempotency_and_completed_scoring -v
-```
-
-Linux 上可加 `--runtime-tmpdir /dev/shm` 验证小容量、`noexec` 临时目录下的回退，运行前确认实际挂载选项。具备私有挂载命名空间权限时，也可运行：
-
-```bash
-bash scripts/restricted_runtime_smoke.sh /path/to/package/bin/modeltrace-health
-```
-
-该脚本在独立命名空间创建 64 MB 临时挂载，验证 `noexec` 回退、时间戳系统调用被拒绝及空间耗尽后的清理与回退，不修改宿主挂载。
 
 ## 管理接口
 

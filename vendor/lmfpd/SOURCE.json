@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/Ikaleio/lm-detector",
+  "commit": "70159b7536a2ceb55c478c8c9472da81d3627e59",
+  "sdk": "sdk/rust (lmfpd 0.2.0)",
+  "data": "https://lm.ikale.io/data/bundle.json + shared_detector.bin",
+  "detectorSha256": "a55d4bb275b09b630d9deeeac5a119077869a40dc65132ffff0ab87e58b7c9e9"
+}
