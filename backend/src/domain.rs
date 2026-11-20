@@ -51,6 +51,17 @@ pub enum RequestRejectedAction {
     Disable,
 }
 
+/// How a scored round is judged degraded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradeRule {
+    /// The top candidate is on the degraded-model list.
+    #[default]
+    DegradedModel,
+    /// The top candidate differs from the requested (alias-mapped) target model.
+    TargetMismatch,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct Config {
@@ -61,6 +72,11 @@ pub struct Config {
     pub max_output_tokens: u32,
     pub timeout_seconds: u64,
     pub degraded_models: Vec<String>,
+    #[serde(default)]
+    pub degrade_rule: DegradeRule,
+    /// Group used by the "移回正常" action; empty disables it.
+    #[serde(default)]
+    pub normal_group_id: String,
     /// Request-log error codes that should enqueue an immediate detection.
     #[serde(default)]
     pub trigger_error_codes: Vec<u16>,
@@ -116,6 +132,8 @@ impl Default for Config {
             max_output_tokens: 4096,
             timeout_seconds: 120,
             degraded_models: vec!["gpt-5.6-luna".into()],
+            degrade_rule: DegradeRule::DegradedModel,
+            normal_group_id: String::new(),
             trigger_error_codes: vec![],
             trigger_cooldown_minutes: default_trigger_cooldown(),
             aliases: BTreeMap::new(),
@@ -148,6 +166,14 @@ impl Config {
             || (self.auto_move_group && self.target_group_id.is_empty())
         {
             return Err("开启降智移组前请选择目标分组".into());
+        }
+        if self.normal_group_id.len() > 128
+            || self
+                .normal_group_id
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err("正常分组无效".into());
         }
         if self.request_model.trim().is_empty()
             || self.request_model.len() > 128
@@ -195,7 +221,7 @@ impl Config {
         if !(1..=16).contains(&self.max_concurrency) {
             return Err("并行检测数须为1至16".into());
         }
-        if self.degraded_models.is_empty()
+        if (self.degrade_rule == DegradeRule::DegradedModel && self.degraded_models.is_empty())
             || self.degraded_models.len() > 128
             || self.aliases.len() > 64
         {
@@ -216,6 +242,14 @@ impl Config {
         referenced.extend(self.aliases.values().cloned());
         if let Some(missing) = referenced.iter().find(|m| !model_ids.contains(m)) {
             return Err(format!("当前指纹库不存在模型：{missing}"));
+        }
+        if self.degrade_rule == DegradeRule::TargetMismatch {
+            let target = self.canonical(&self.request_model);
+            if !model_ids.iter().any(|m| m == target) {
+                return Err(format!(
+                    "按目标模型判定时，请求模型须在当前指纹库内：{target} 不在库中，请在别名中映射到库内模型"
+                ));
+            }
         }
         if self.aliases.keys().any(|k| k.is_empty() || k.len() > 128) {
             return Err("别名名称无效".into());
@@ -590,11 +624,16 @@ impl Job {
             return "low_confidence";
         }
         let cfg = &self.config;
-        let exempt = cfg
-            .degraded_models
-            .iter()
-            .any(|m| m == cfg.canonical(&cfg.request_model));
-        let degraded_top = !exempt && cfg.degraded_models.contains(&score.prediction);
+        let degraded_top = match cfg.degrade_rule {
+            DegradeRule::DegradedModel => {
+                let exempt = cfg
+                    .degraded_models
+                    .iter()
+                    .any(|m| m == cfg.canonical(&cfg.request_model));
+                !exempt && cfg.degraded_models.contains(&score.prediction)
+            }
+            DegradeRule::TargetMismatch => score.prediction != cfg.canonical(&cfg.request_model),
+        };
         let Some(probability) = score.probability else {
             // Ranking-only round (fewer than three replies): upstream gives no confidence, so the
             // top candidate and the consecutive-round confirmation decide alone.
@@ -677,18 +716,37 @@ mod tests {
         assert_eq!(j.classify(&empty), "low_confidence");
     }
     #[test]
+    fn target_mismatch_rule() {
+        let mut j = job();
+        j.config.degrade_rule = DegradeRule::TargetMismatch;
+        j.config.request_model = "my-sol".into();
+        j.config.aliases.insert("my-sol".into(), "gpt-6-sol".into());
+        j.config.degraded_models.clear();
+        assert_eq!(j.classify(&ranking("gpt-6-sol")), "no_match");
+        assert_eq!(j.classify(&ranking("claude-haiku-4.5")), "degraded");
+        assert_eq!(j.classify(&score("gpt-6-sol", 0.95)), "no_match");
+        assert_eq!(j.classify(&score("gpt-5.6-luna", 0.95)), "degraded");
+        assert_eq!(j.classify(&score("gpt-5.6-luna", 0.5)), "inconclusive");
+        let ids = vec!["gpt-6-sol".to_string()];
+        assert!(j.config.validate(&ids).is_ok());
+        j.config.aliases.clear();
+        assert!(j.config.validate(&ids).unwrap_err().contains("my-sol"));
+        j.config.degrade_rule = DegradeRule::DegradedModel;
+        assert!(j.config.validate(&ids).is_err()); // the degraded-model rule needs a list
+    }
+    #[test]
     fn legacy_scores_still_parse() {
         let s: Score = serde_json::from_value(serde_json::json!({"prediction":"a","probability":0.5,"results":[{"model":"a","label":"a","family":"f","probability":0.5}],"families":[]})).unwrap();
         assert_eq!(s.probability, Some(0.5));
         assert_eq!(s.results[0].probability, Some(0.5));
         let mut cfg = serde_json::to_value(Config::default()).unwrap();
-        cfg.as_object_mut().unwrap().remove("challengesPerRound");
-        assert_eq!(
-            serde_json::from_value::<Config>(cfg)
-                .unwrap()
-                .challenges_per_round,
-            1
-        );
+        for key in ["challengesPerRound", "degradeRule", "normalGroupId"] {
+            cfg.as_object_mut().unwrap().remove(key);
+        }
+        let cfg = serde_json::from_value::<Config>(cfg).unwrap();
+        assert_eq!(cfg.challenges_per_round, 1);
+        assert_eq!(cfg.degrade_rule, DegradeRule::DegradedModel);
+        assert!(cfg.normal_group_id.is_empty());
     }
     #[test]
     fn thresholds_and_confirmation() {

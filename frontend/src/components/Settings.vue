@@ -4,6 +4,7 @@ import { ZButton } from '@codex-proxy/ui/button'
 import { ZInput } from '@codex-proxy/ui/input'
 import { ZSelect } from '@codex-proxy/ui/select'
 import { ZCheckbox } from '@codex-proxy/ui/checkbox'
+import { ZSegmented } from '@codex-proxy/ui/segmented'
 import { ZSwitch } from '@codex-proxy/ui/switch'
 import {
   ArchiveRestore, BellRing, CalendarClock, Check, ChevronDown, CircleAlert, Clock, Copy, DatabaseBackup, Download, Fingerprint,
@@ -102,6 +103,10 @@ const keyOptions = computed(() => props.keys.map(k => ({ value: k.id, label: k.n
 const modelOptions = computed(() => models.value.map(m => ({ value: m, label: m })))
 const effortOptions = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'].map(s => ({ value: s, label: s || '不传递' }))
 const targetOptions = computed(() => props.groups.map(g => ({ value: g.id, label: g.name })))
+const normalOptions = computed(() => [{ value: '', label: '不使用（隐藏移回正常按钮）' }, ...targetOptions.value])
+const ruleOptions = [{ value: 'degraded_model', label: '出现降级模型' }, { value: 'target_mismatch', label: '与目标模型不匹配' }]
+const targetModel = computed(() => cfg.value.aliases?.[cfg.value.requestModel] || cfg.value.requestModel)
+const targetInBank = computed(() => props.banks.active.models.some(m => m.id === targetModel.value))
 const groupOptions = computed(() => [{ value: '', label: '全部分组' }, { value: '__ungrouped__', label: '未分组' }, ...props.groups.map(g => ({ value: g.id, label: g.name }))])
 const planOptions = computed(() => Array.from(new Set(props.accounts.map(a => a.planType || 'unknown'))).sort().map(p => ({ value: p, label: p })))
 const statusOptions = [{ value: '', label: '全部已启用状态' }, ...Object.entries(statusLabels).map(([value, label]) => ({ value, label }))]
@@ -248,12 +253,20 @@ function save() {
     <!-- 2. Verdict rules -->
     <section class="panel" :aria-labelledby="id('rules')">
       <div class="panel-head">
-        <div class="panel-title"><span class="panel-icon"><ShieldAlert :size="17" /></span><div><h3 :id="id('rules')">降智判定与复测</h3><p>请求模型不在降级名单内，而最高候选命中名单且概率达到阈值时，按确认轮数判定降智。</p></div></div>
+        <div class="panel-title"><span class="panel-icon"><ShieldAlert :size="17" /></span><div><h3 :id="id('rules')">降智判定与复测</h3><p>按所选判定规则，最高候选满足条件且（有置信度时）概率达到阈值，按确认轮数判定降智。</p></div></div>
         <div class="panel-actions"><ZButton :disabled="busy" title="阈值 20% / 90%，确认 1 轮，复测 1 次，失败重试 4 次，保留账户调度，间隔 10 秒，并清空日志触发错误码" @click="useDefaults"><template #icon><RotateCcw :size="14" /></template>使用默认规则</ZButton></div>
       </div>
       <div v-if="rulesNotice" class="notice tone-info block" role="status"><Info :size="15" /><span>{{ rulesNotice }}</span></div>
 
-      <div class="models" role="group" :aria-labelledby="id('models')">
+      <div class="field rule-field">
+        <span :id="id('rule')" class="field-label">降智判定规则</span>
+        <ZSegmented v-model="cfg.degradeRule" :options="ruleOptions" :aria-labelledby="id('rule')" aria-label="降智判定规则" />
+        <span v-if="cfg.degradeRule === 'degraded_model'" class="help">最高候选出现在下方降级模型名单中即视为降智；请求模型本身在名单内时不判定。</span>
+        <span v-else class="help">最高候选与目标模型 <b class="mono">{{ targetModel }}</b> 不一致即视为降智（目标模型为请求模型经别名映射后的结果，需在当前指纹库内）。
+          <b v-if="!targetInBank" class="text-danger">当前目标模型不在指纹库中，请在别名中映射到库内模型。</b></span>
+      </div>
+
+      <div v-if="cfg.degradeRule === 'degraded_model'" class="models" role="group" :aria-labelledby="id('models')">
         <div class="models-head">
           <span :id="id('models')" class="field-label">降级模型名单</span>
           <span class="pill" :class="cfg.degradedModels.length ? 'tone-primary' : 'tone-danger'">已选 {{ cfg.degradedModels.length }} / {{ banks.active.models.length }}</span>
@@ -312,7 +325,12 @@ function save() {
           </div>
         </div>
       </div>
-      <div class="notice tone-warning block"><TriangleAlert :size="15" /><span>移组会用目标分组<b>替换</b>账户原有的全部分组，而不是追加。</span></div>
+      <div class="normal-group">
+        <span class="field-label">正常分组</span>
+        <ZSelect v-model="cfg.normalGroupId" class="normal-select" :options="normalOptions" placeholder="选择已有分组" aria-label="正常分组" />
+        <span class="help">账户检测页每行“检测”右侧的“移回正常”按钮会把账户移入此分组；不改变账户调度状态。</span>
+      </div>
+      <div class="notice tone-warning block"><TriangleAlert :size="15" /><span>移组和移回正常都会用目标分组<b>替换</b>账户原有的全部分组，而不是追加。</span></div>
     </section>
 
     <!-- 4. Request log trigger -->
@@ -552,6 +570,11 @@ html[data-theme='dark'] .control { color-scheme: dark; }
 .option-target { display: flex; align-items: center; gap: 10px; flex: 0 1 340px; min-width: 0; }
 .option-target > :last-child { flex: 1; min-width: 0; }
 .option-target .field-label { white-space: nowrap; font-size: 13px; }
+.normal-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 12px; }
+.normal-group .field-label { white-space: nowrap; font-size: 13px; }
+.normal-group .normal-select { flex: 0 1 340px; min-width: 200px; }
+.normal-group .help { flex-basis: 100%; }
+.rule-field { margin-bottom: 14px; }
 
 /* Trigger status */
 .stats { display: grid; gap: 6px; padding: 10px 14px; border-radius: var(--z-border-radius, 8px); background: var(--z-color-fill-quaternary, #f6f8fb); font-size: 12px; }
