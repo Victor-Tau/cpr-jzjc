@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/Victor-Tau/cpr-jzjc)](https://github.com/Victor-Tau/cpr-jzjc/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CPR: 3.55.3](https://img.shields.io/badge/CPR-3.55.3-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs)
+[![CPR: 3.55.3](https://img.shields.io/badge/CPR-3.55.3-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs/releases/tag/v3.55.3)
 
 在 **Codex Proxy RS（CPR）** 管理页面中，批量检测账户的模型输出、查看指纹匹配结果，并按自定义规则执行复测、定时检查和账户处理。
 
@@ -45,7 +45,7 @@
 | 项目 | 当前发布版本要求 |
 | --- | --- |
 | 插件版本 | **2.1.2** |
-| CPR 宿主 | **>=3.55.3、<3.56.0** |
+| CPR 宿主 | **>=3.54.0、<3.56.0** |
 | 平台 | **Linux x86_64 / ARM64（aarch64），glibc 2.36+** |
 | 运行模式 | `trustedProcess` |
 | 评分内核 | lm-detector Rust 原生实现，内置参考库与检测器，无需 Python 或额外服务 |
@@ -71,7 +71,9 @@
 
 在宿主插件管理中上传新版本包，更新并切换**现有插件实例**。同实例升级保留配置、计划、检测历史和指纹库；升级前也可在「参数配置 → 配置备份」导出配置。
 
-[2.1.2](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.2) 适配 CPR 3.55.3。[2.1.1](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.1) 适配 CPR 3.54.0。[2.1.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.0) 新增「移回正常」与两种降智判定规则，宿主范围不变。[2.0.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.0.0) 将检测内核切换为 lm-detector 并移除 Python 运行时，宿主范围与 1.28.0 相同（CPR 3.53.1）；升级会替换旧指纹库并结束进行中的检测，详见 [发行说明](docs/releases/v2.0.0.md)。[1.28.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.28.0) 适配 CPR 3.53.1；[1.27.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.27.0) 适配 CPR 3.52.2；[1.26.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.26.0) 适配 CPR 3.51.0；[1.25.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.25.0) 适配 CPR 3.49.0；[1.24.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.24.0) 适配 CPR 3.48.0；[1.23.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.23.0) 适配 CPR 3.47.0。同实例升级保留配置、计划、历史和指纹库，x86_64 与 ARM64 分别下载对应安装包。
+[2.1.2](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.2) 适配 CPR 3.55.3，兼容 CPR 3.54.x 和 3.55.x。
+
+[2.1.1](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.1) 适配 CPR 3.54.0。[2.1.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.0) 新增「移回正常」与两种降智判定规则，宿主范围不变。[2.0.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.0.0) 将检测内核切换为 lm-detector 并移除 Python 运行时，宿主范围与 1.28.0 相同（CPR 3.53.1）；升级会替换旧指纹库并结束进行中的检测，详见 [发行说明](docs/releases/v2.0.0.md)。[1.28.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.28.0) 适配 CPR 3.53.1；[1.27.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.27.0) 适配 CPR 3.52.2；[1.26.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.26.0) 适配 CPR 3.51.0；[1.25.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.25.0) 适配 CPR 3.49.0；[1.24.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.24.0) 适配 CPR 3.48.0；[1.23.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.23.0) 适配 CPR 3.47.0。同实例升级保留配置、计划、历史和指纹库，x86_64 与 ARM64 分别下载对应安装包。
 
 [1.21.0](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v1.21.0) 新增 Linux ARM64（aarch64）安装包，宿主范围与 1.20.0 相同（CPR 3.44.0）。同实例升级保留配置、计划、历史和指纹库；更新时选择与宿主架构一致的安装包。
 

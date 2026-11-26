@@ -6,7 +6,7 @@
   "version": "2.1.2",
   "description": "lm-detector 账户检测、自动复测、定时检查与指纹库在线更新",
   "license": "MIT",
-  "engines": { "codex-proxy-rs": ">=3.55.3, <3.56.0" },
+  "engines": { "codex-proxy-rs": ">=3.54.0, <3.56.0" },
   "main": "bin/modeltrace-health",
   "runtime": "trustedProcess",
   "contributes": { "management": { "version": 2 }, "maintenance": {} },
