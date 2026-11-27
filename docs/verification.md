@@ -1,18 +1,17 @@
-# v2.1.3 验证记录
+# v2.1.4 验证记录
 
-宿主范围为 CPR `>=3.54.0,<3.57.0`。发布平台为 Linux x86_64 和 ARM64，要求 glibc 2.36+。SDK 与打包工具固定到 CPR v3.56.0 提交 `a46d0f4c08bcf0f89aa004eb1d089e9e0039898c`。
+宿主范围为 CPR `>=3.54.0,<3.58.0`。发布平台为 Linux x86_64 和 ARM64，要求 glibc 2.36+。SDK 与打包工具固定到 CPR v3.57.0 提交 `6950c02ee460143dd63103a35a5dd679712488dc`。
 
 ## 兼容性核对
 
-宿主保持清单 v2、RPC v7、管理能力 v2、维护能力 v1 和页面宿主桥 v2。此版 SDK 的新增声明用于中间件，插件使用管理和维护能力。
-
-CPR 3.56 移除了 Responses、Messages 和 GenAI 之间的内置转换。检测请求的协议与目标账号提供方均为 OpenAI，走宿主原生 Responses 路径。模型列表继续以所选 Key 可通过该协议访问的模型为准。
+CPR 3.57 将 OpenAI 请求和 WebSocket 连接池配置纳入运行设置。插件通过账户管理、私有状态和原生 Responses 请求完成检测，继续使用宿主当前配置。宿主支持的清单 v2、RPC v7、管理能力 v2、维护能力 v1 及页面桥 v2 保持兼容。
 
 ## 验证
 
-- Rust 格式检查、Clippy、28 项单元测试、前端构建和 API 回归通过。
-- 使用官方打包工具生成 macOS ARM64 验证包。在隔离的 CPR 3.54.3、3.55.3 和 3.56.0 上通过安装、启用、管理页面资源、账号列表、指纹库加载及配置读写验证。联调使用空账号目录。
-- Linux x86_64 和 ARM64 的发布包构建和模拟宿主 RPC 回归由 [GitHub Actions](https://github.com/Victor-Tau/cpr-jzjc/actions/workflows/build.yml) 执行。
+- Rust 格式检查、Clippy、28 项单元测试、前端构建及 API 分页回归通过。
+- 模拟宿主验证了账号绑定与评分、配置导入预览、分组分页及失效令牌处理。
+- 在隔离的 macOS ARM64 宿主 CPR 3.54.3、3.55.3、3.56.0 和 3.57.0 上，验证安装、启用、页面资源、账号列表、指纹库和配置读写。联调使用空账号目录。
+- Linux x86_64 和 ARM64 的发布包构建与完整 RPC 回归由 [GitHub Actions](https://github.com/Victor-Tau/cpr-jzjc/actions/workflows/build.yml) 执行。
 
 ## 历史验证
 
