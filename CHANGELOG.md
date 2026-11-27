@@ -8,6 +8,7 @@
 
 | 插件版本 | CPR 宿主范围 |
 | --- | --- |
+| 2.1.3 | >=3.54.0、<3.57.0 |
 | 2.1.2 | >=3.54.0、<3.56.0 |
 | 2.1.1 | >=3.54.0、<3.55.0 |
 | 2.1.0 | >=3.53.1、<3.54.0 |
@@ -41,12 +42,19 @@
 
 升级时通过宿主更新现有插件实例，可保留兼容 schema 下的配置、计划、历史与指纹库。版本中特有的数据保留变化在对应条目注明。
 
+## [2.1.3](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.3) — 待发布
+
+- 适配 CPR 3.56.0，兼容范围为 `>=3.54.0,<3.57.0`。SDK 和官方打包工具同步到 CPR v3.56.0。
+- 检测继续使用 OpenAI 账号的原生 Responses，兼容 CPR 3.56 移除内置跨协议转换后的请求路径。
+
+[详细说明](docs/releases/v2.1.3.md) · [验证记录](docs/verification.md)
+
 ## [2.1.2](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.2) — 2026-11-26
 
 - 适配 CPR 3.55.3，兼容范围为 `>=3.54.0,<3.56.0`。SDK 和官方打包工具同步到 CPR v3.55.3。
 - 提供 Linux x86_64 和 ARM64 安装包及 SHA-256 校验文件。同实例升级保留配置、计划、检测历史和指纹库。
 
-[详细说明](docs/releases/v2.1.2.md) · [验证记录](docs/verification.md)
+[详细说明](docs/releases/v2.1.2.md) · [验证记录](docs/verification-v2.1.2.md)
 
 ## [2.1.1](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.1) — 2026-11-20
 
