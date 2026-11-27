@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/Victor-Tau/cpr-jzjc)](https://github.com/Victor-Tau/cpr-jzjc/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CPR: 3.57.0](https://img.shields.io/badge/CPR-3.57.0-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs/releases/tag/v3.57.0)
+[![CPR: 3.57.1](https://img.shields.io/badge/CPR-3.57.1-2563eb.svg)](https://github.com/zyycn/codex-proxy-rs/releases/tag/v3.57.1)
 
 在 **Codex Proxy RS（CPR）** 管理页面中，批量检测账户的模型输出、查看指纹匹配结果，并按自定义规则执行复测、定时检查和账户处理。
 
@@ -44,7 +44,7 @@
 
 | 项目 | 当前发布版本要求 |
 | --- | --- |
-| 插件版本 | **2.1.4** |
+| 插件版本 | **2.1.5** |
 | CPR 宿主 | **>=3.54.0、<3.58.0** |
 | 平台 | **Linux x86_64 / ARM64（aarch64），glibc 2.36+** |
 | 运行模式 | `trustedProcess` |
@@ -71,7 +71,7 @@
 
 在宿主插件管理中上传新版本包，更新并切换**现有插件实例**。同实例升级保留配置、计划、检测历史和指纹库；升级前也可在「参数配置 → 配置备份」导出配置。
 
-[2.1.4](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.4) 适配 CPR 3.57.0，兼容 CPR 3.54.x 至 3.57.x。
+[2.1.5](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.5) 适配 CPR 3.57.1，兼容 CPR 3.54.x 至 3.57.x。
 
 [2.1.2](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.2) 适配 CPR 3.55.3，兼容 CPR 3.54.x 和 3.55.x。
 
