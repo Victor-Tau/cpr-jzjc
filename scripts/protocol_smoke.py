@@ -1276,8 +1276,14 @@ class Integration(unittest.TestCase):
     def test_invalid_samples_keep_healthy_worker(self):
         self.config(lowConfidencePercent=0,degradedPercent=100)
         identity=self.submit();original=self.host.callback;workers=set()
+        parent_pid = self.host.process.pid
         def callback(method,p,body):
-            workers.update(Path(f'/proc/{self.host.process.pid}/task/{self.host.process.pid}/children').read_text().split())
+            if sys.platform == 'darwin':
+                processes = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True)
+                workers.update(pid for pid, ppid in (line.split() for line in processes.splitlines())
+                               if ppid == str(parent_pid))
+            else:
+                workers.update(Path(f'/proc/{parent_pid}/task/{parent_pid}/children').read_text().split())
             if method=='host.model.stream_read':
                 return model_events({'type':'response.completed','response':{'output':[{'content':[{'type':'output_text','text':'1,2,3'}]}]}},end=True)
             return original(method,p,body)
