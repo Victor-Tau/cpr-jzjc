@@ -8,6 +8,8 @@
 
 | 插件版本 | CPR 宿主范围 |
 | --- | --- |
+| 2.1.8 | >=3.54.0、<3.59.0 |
+| 2.1.7 | >=3.54.0、<3.59.0 |
 | 2.1.6 | >=3.54.0、<3.58.0 |
 | 2.1.5 | >=3.54.0、<3.58.0 |
 | 2.1.4 | >=3.54.0、<3.58.0 |
@@ -44,12 +46,26 @@
 
 升级时通过宿主更新现有插件实例，可保留兼容 schema 下的配置、计划、历史与指纹库。版本中特有的数据保留变化在对应条目注明。
 
+## [2.1.8](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.8) — 待发布
+
+- 新增 macOS ARM64 安装包。Linux x86_64、Linux ARM64 和 macOS ARM64 使用相同的插件版本及宿主兼容范围。
+- 三个安装包均附 SHA-256 校验文件。macOS ARM64 包从 Apple 芯片 Mac 原生构建。
+
+[详细说明](docs/releases/v2.1.8.md) · [验证记录](docs/verification.md)
+
+## [2.1.7](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.7) — 待发布
+
+- 适配 CPR 3.58.0，宿主范围为 `>=3.54.0,<3.59.0`，SDK 和官方打包工具固定到 CPR v3.58.0。
+- 提供 Linux x86_64 和 ARM64 安装包及 SHA-256 校验文件。同实例升级可保留配置、计划、检测历史和指纹库。
+
+[详细说明](docs/releases/v2.1.7.md) · [验证记录](docs/verification-v2.1.7.md)
+
 ## [2.1.6](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.6) — 2026-11-28
 
 - 适配 CPR 3.57.2，兼容范围为 `>=3.54.0,<3.58.0`，SDK 和官方打包工具同步到 CPR v3.57.2。
 - 复用此前 3.56.x 和 3.57.x 的适配改动，通过 GitHub Actions 构建 Linux x86_64 和 ARM64 安装包及 SHA-256 校验文件。同实例升级保留配置、计划、检测历史和指纹库。
 
-[详细说明](docs/releases/v2.1.6.md) · [验证记录](docs/verification.md)
+[详细说明](docs/releases/v2.1.6.md) · [验证记录](docs/verification-v2.1.6.md)
 
 ## [2.1.5](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.5) — 待发布
 
