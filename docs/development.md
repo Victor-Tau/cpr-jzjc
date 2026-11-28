@@ -17,13 +17,13 @@
 
 ## 环境准备
 
-支持 Linux x86_64 和 ARM64（aarch64），两种架构共用业务代码与构建脚本。需要以下工具：
+支持 Linux x86_64、Linux ARM64 和 macOS ARM64。需要以下工具：
 
 | 工具 | 要求或用途 |
 | --- | --- |
 | Rust | `rust-toolchain.toml` 固定为 1.99.1，含 rustfmt 和 Clippy |
 | Node.js / pnpm | Node.js >=24、pnpm 9.12.2，使用前端锁文件安装依赖 |
-| Python | >=3.11.4，仅用于验证脚本（标准库）；CI 使用 3.11.17 |
+| Python | >=3.11.4，打包和验证脚本使用标准库 |
 | Zig / cargo-zigbuild | 构建 glibc 2.36 目标的发布二进制；也可在匹配架构、glibc <=2.36 的 Linux 环境启用原生构建 |
 | cpr-plugin | `scripts/install_packager.py` 自动使用 `backend/Cargo.toml` 中 SDK 的固定提交安装 |
 
@@ -40,15 +40,15 @@ Rust 与前端依赖分别由 `backend/Cargo.lock` 和 `frontend/pnpm-lock.yaml`
 
 ## 自动构建与发布
 
-[GitHub Actions 工作流](../.github/workflows/build.yml) 在每次 PR、主分支更新和手动触发时，以独立原生 runner 验证 x86_64、ARM64。两个任务都在 Python 3.11.17 / Debian 12 容器内运行，避免原生链接引入高于 glibc 2.36 的依赖。
+[GitHub Actions 工作流](../.github/workflows/build.yml) 在每次 PR、主分支更新和手动触发时，以独立原生 runner 验证 Linux x86_64 和 ARM64。两个 Linux 目标在 Python 3.11.17 / Debian 12 容器内构建，使用 glibc 2.36。
 
 双架构实现的本地构建、架构防错与发布流程验证见 [ARM64 验证记录](verification-arm64.md)。
 
-每个任务调用同一个 `scripts/package.sh`，检查 Rust、前端、评分及构建脚本，验证最终包的 ELF 架构、资源摘要和进程内启动评分，再执行最终包二进制的完整 RPC 回归。缓存键包含目标架构和依赖输入，两个任务使用各自工作区，不共享运行时和许可证输出。
+每个任务调用同一个 `scripts/package.sh`，检查 Rust、前端、评分及构建脚本，验证最终包的可执行文件格式及架构、资源摘要和进程内启动评分，再执行最终包二进制的完整 RPC 回归。缓存键包含目标架构和依赖输入，各任务使用独立工作区，不共享运行时和许可证输出。
 
-日常功能修改无需增加 ARM64 专用操作。维护者一次性在仓库规则中将 `Build x86_64-unknown-linux-gnu` 和 `Build aarch64-unknown-linux-gnu` 设为必需检查。
+macOS ARM64 在 Apple 芯片 Mac 上通过同一打包脚本原生构建。打包后也可运行完整的 RPC 回归。
 
-发布时同步 `plugin.json`、`backend/Cargo.toml` 和 `frontend/package.json` 中的同一个版本，推送 `v<版本>` 标签。工作流检查版本一致性，等待两个构建任务通过，核对两份安装包及摘要后上传 GitHub Release。安装包名称和 manifest 的 `package.target` 区分架构，插件版本不加架构后缀。
+发布时同步 `plugin.json`、`backend/Cargo.toml` 和 `frontend/package.json` 中的同一个版本，为两个 Linux 目标和 macOS ARM64 构建安装包。核对三个安装包及摘要后，将它们上传到同一 GitHub Release。安装包名称和 manifest 的 `package.target` 区分架构，插件版本不加架构后缀。
 
 升级 CPR SDK 时，打包工具自动跟随 SDK 提交；验证脚本从源码 manifest 读取预期兼容范围。升级 lm-detector 时，用上游 `sdk/rust/src` 中的 `analysis`、`challenge`、`codec`、`error`、`features`、`ranker` 覆盖 `backend/src/lmfpd/`（把 `crate::` 改为 `super::`），同步 `data.rs` 的解码部分，并用 `https://lm.ikale.io/data/` 的 `bundle.json` 与解压后的 `shared_detector.bin` 替换 `vendor/lmfpd/data/`，更新 `SOURCE.json`。
 
@@ -68,7 +68,17 @@ python scripts/protocol_smoke.py -v
 
 RPC 集成测试启动实际插件进程，模拟账户、计量 Key、宿主存储、模型事件和指纹库下载。覆盖请求绑定、复测、身份变化、定时范围、停用/移组重试、更新回退、取消、持久化恢复、并发与预算边界，不访问真实账户。可通过 `--binary /path/to/modeltrace-health` 验证从安装包解出的二进制。
 
-## 单核发布构建
+## 本地打包
+
+在 Apple 芯片 Mac 上，安装官方打包工具并执行以下命令：
+
+```bash
+python3 scripts/install_packager.py
+export PATH="$PWD/.cache/tools/bin:$PATH"
+CPR_TARGET=aarch64-apple-darwin bash scripts/package.sh
+```
+
+### Linux 单核构建
 
 所有编译进程可通过 CPU 亲和性限制在单个核心，线程数同时设为 1。以下示例使用 CPU 0；若 CPU 0 不在容器或主机允许的集合中，请将 `task_cpu` 改为可用核心。
 

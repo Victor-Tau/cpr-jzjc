@@ -4,7 +4,7 @@ task_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$task_root"
 target="${CPR_TARGET:-x86_64-unknown-linux-gnu}"
 case "$target" in
-  x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) ;;
+  x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu|aarch64-apple-darwin) ;;
   *) echo "Unsupported CPR_TARGET: $target" >&2; exit 2 ;;
 esac
 pnpm --dir frontend install --frozen-lockfile
@@ -14,7 +14,10 @@ cargo test --manifest-path backend/Cargo.toml --locked
 cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
 node scripts/api_smoke.mjs
 python3 scripts/collect_licenses.py
-if command -v cargo-zigbuild >/dev/null 2>&1; then
+if [[ "$target" == aarch64-apple-darwin ]]; then
+  [[ "$(rustc -vV | sed -n 's/^host: //p')" == "$target" ]] || { echo "macOS ARM64 building requires a native Rust toolchain" >&2; exit 2; }
+  cargo build --manifest-path backend/Cargo.toml --locked --release --target "$target"
+elif command -v cargo-zigbuild >/dev/null 2>&1; then
   cargo zigbuild --manifest-path backend/Cargo.toml --locked --release --target "${target}.2.36"
 elif [[ "${CPR_NATIVE_BUILD:-0}" == "1" ]]; then
   [[ "$(rustc -vV | sed -n 's/^host: //p')" == "$target" ]] || { echo "Native build requires a matching host target" >&2; exit 2; }
@@ -28,6 +31,6 @@ else
   echo "cargo-zigbuild is required, or set CPR_NATIVE_BUILD=1 on a native target host" >&2
   exit 2
 fi
-cpr-plugin package --manifest plugin.json --binary "backend/target/$target/release/modeltrace-health" --target "$target" --resource-map web=frontend/dist --output-dir dist
+cpr-plugin package --manifest plugin.json --binary "${CARGO_TARGET_DIR:-backend/target}/$target/release/modeltrace-health" --target "$target" --resource-map web=frontend/dist --output-dir dist
 task_version="$(python3 -c 'import json; print(json.load(open("plugin.json"))["version"])')"
 python3 scripts/verify_artifact.py "dist/personal.modeltrace-health-${task_version}-${target}.tar.gz" "$target"

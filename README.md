@@ -44,9 +44,9 @@
 
 | 项目 | 当前发布版本要求 |
 | --- | --- |
-| 插件版本 | **2.1.7** |
+| 插件版本 | **2.1.8** |
 | CPR 宿主 | **>=3.54.0、<3.59.0** |
-| 平台 | **Linux x86_64 / ARM64（aarch64），glibc 2.36+** |
+| 平台 | **Linux x86_64 / ARM64（glibc 2.36+）、macOS ARM64（Apple 芯片）** |
 | 运行模式 | `trustedProcess` |
 | 评分内核 | lm-detector Rust 原生实现，内置参考库与检测器，无需 Python 或额外服务 |
 
@@ -54,14 +54,14 @@
 
 ### 首次安装
 
-1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 选择与宿主架构匹配的安装包：x86_64 对应 `*-x86_64-unknown-linux-gnu.tar.gz`，ARM64 对应 `*-aarch64-unknown-linux-gnu.tar.gz`，可同时下载 `.sha256` 校验文件。
+1. 从 [Releases](https://github.com/Victor-Tau/cpr-jzjc/releases/latest) 下载与宿主系统和架构匹配的安装包。Linux x86_64 对应 `*-x86_64-unknown-linux-gnu.tar.gz`，Linux ARM64 对应 `*-aarch64-unknown-linux-gnu.tar.gz`，macOS ARM64 对应 `*-aarch64-apple-darwin.tar.gz`。每个包附有 `.sha256` 校验文件。
 2. 在 CPR 中打开「插件管理 → 安装插件 → 上传包」，上传下载的安装包并启用。
 3. 打开「账号降智检测 → 参数配置」，选择已有计量 Key，确认请求模型及判定规则，点击「保存全部参数」。
 4. 回到「账户检测」，先选择一个账户执行检测，在报告中查看结果，再按需启用批量检测或定时检查。
 
 下载的是 Release 附件中的插件安装包；GitHub 自动生成的 `Source code` 归档用于源码开发。
 
-两种架构使用同一个插件版本。历史 Release 若没有 ARM64 附件，可按 [开发与构建](docs/development.md) 从对应源码构建。PR 与主分支更新会自动验证两种架构；推送与插件版本一致的 `v<版本>` 标签后，发布流程会在两种架构均通过后上传安装包。
+GitHub Actions 验证两个 Linux 目标。macOS ARM64 使用相同的打包脚本在 Apple 芯片 Mac 上原生构建和验证。
 
 检测请求由宿主绑定到账户 ID，沿用该账户的代理，并计入所选 Key 的用量。Key 的账户分组和模型权限由宿主校验，插件页面只读取 Key ID 和名称。
 
@@ -71,7 +71,7 @@
 
 在宿主插件管理中上传新版本包，更新并切换**现有插件实例**。同实例升级保留配置、计划、检测历史和指纹库；升级前也可在「参数配置 → 配置备份」导出配置。
 
-[2.1.7](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.7) 适配 CPR 3.58.0，兼容 CPR 3.54.x 至 3.58.x。
+[2.1.8](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.8) 增加 macOS ARM64 安装包，兼容 CPR 3.54.x 至 3.58.x。
 
 [2.1.2](https://github.com/Victor-Tau/cpr-jzjc/releases/tag/v2.1.2) 适配 CPR 3.55.3，兼容 CPR 3.54.x 和 3.55.x。
 
